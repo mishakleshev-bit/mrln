@@ -221,16 +221,18 @@ void TFTGLCD::print_screen() {
   framebuffer[FBSIZE - 2] = picBits & PIC_MASK;
   framebuffer[FBSIZE - 1] = ledBits;
   #if ENABLED(TFTGLCD_PANEL_SPI)
-    // Send all framebuffer to panel
-    WRITE(TFTGLCD_CS, LOW);
-    SPI_SEND_ONE(LCD_WRITE);
-    SPI_SEND_SOME(framebuffer, FBSIZE, 0);
-    WRITE(TFTGLCD_CS, HIGH);
+    // Отправляем по одной строке за раз, освобождая SPI между строками
+    for (uint8_t i = 0; i < LCD_HEIGHT; i++) {
+      WRITE(TFTGLCD_CS, LOW);
+      SPI_SEND_ONE(LCD_WRITE);
+      SPI_SEND_SOME(framebuffer, LCD_WIDTH, i * LCD_WIDTH);
+      WRITE(TFTGLCD_CS, HIGH);
+      // Освобождаем SPI шину для stepper ISR
+    }
   #else
+    // I2C код уже работает построчно - оставляем как есть
     uint8_t r;
-    // Send framebuffer to panel by line
     Wire.beginTransmission(uint8_t(LCD_I2C_ADDRESS));
-    // First line
     Wire.write(LCD_WRITE);
     Wire.write(&framebuffer[0], LCD_WIDTH);
     Wire.endTransmission();
@@ -239,7 +241,6 @@ void TFTGLCD::print_screen() {
       Wire.write(&framebuffer[r * LCD_WIDTH], LCD_WIDTH);
       Wire.endTransmission();
     }
-    // Last line
     Wire.beginTransmission(uint8_t(LCD_I2C_ADDRESS));
     Wire.write(&framebuffer[r * LCD_WIDTH], LCD_WIDTH);
     Wire.write(&framebuffer[FBSIZE - 2], 2);
