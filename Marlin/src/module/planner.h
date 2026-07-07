@@ -328,13 +328,23 @@ typedef struct PlannerBlock {
     #endif
   #endif
 
-  #if ENABLED(FT_MOTION)
-    float entry_speed,                      // Block entry speed in steps units
-          exit_speed;                       // Block exit speed in steps units
-  #endif
+#if ENABLED(FT_MOTION)
+  float entry_speed,                      // Block entry speed in steps units
+        exit_speed;                       // Block exit speed in steps units
+#endif
 
-  #if HAS_STANDARD_MOTION
-    uint32_t nominal_rate,                  // The nominal step rate for this block in step_events/sec
+//===========================================================================
+//================== SPA - Simplified Pressure Advance =====================
+//===========================================================================
+#if ENABLED(PA_LOOKAHEAD)
+  int32_t pa_p_start_q16;                 // Давление на входе в блок (Q16)
+  int32_t pa_p_target_q16;                // Целевое давление на выходе из блока (Q16)
+  int32_t pa_K_q16;                       // Коэффициент K для этого блока (Q16)
+  bool    pa_active;                      // Флаг активности PA для этого блока
+#endif
+
+#if HAS_STANDARD_MOTION
+  uint32_t nominal_rate,                  // The nominal step rate for this block in step_events/sec
              initial_rate,                  // The jerk-adjusted step rate at start of block
              final_rate,                    // The minimal rate at exit
              acceleration_steps_per_s2;     // acceleration steps/sec^2
