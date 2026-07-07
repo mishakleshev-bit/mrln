@@ -22,6 +22,7 @@
 
 #include "../gcode.h"
 #include "../../module/motion.h"
+#include "../../module/planner.h" // <--- ДОБАВЬ ЭТУ СТРОКУ
 
 #if ENABLED(I2C_POSITION_ENCODERS)
   #include "../../feature/encoder_i2c.h"
@@ -125,4 +126,16 @@ void GcodeSuite::G92() {
   #endif
 
   IF_DISABLED(DIRECT_STEPPING, motion.report_position());
+
+    // --- SPA State Reset on E coordinate change ---
+  #if ENABLED(PA_LOOKAHEAD)
+    if (parser.seenval('E')) planner.pa_flush_queue();
+  #endif
+  #if ENABLED(SIMPLIFIED_PA)
+    if (parser.seenval('E')) {
+      extern void ftmotion_pa_reset_state();
+      ftmotion_pa_reset_state();
+    }
+  #endif
+  // -----------------------------------------------
 }

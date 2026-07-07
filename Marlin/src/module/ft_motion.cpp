@@ -49,6 +49,11 @@
   #include "../feature/runout.h"
 #endif
 
+#if ENABLED(SIMPLIFIED_PA)
+  static int32_t spa_p_q16 = 0; // Выносим переменную давления на уровень файла
+  void ftmotion_pa_reset_state() { spa_p_q16 = 0; } // Функция сброса для G92
+#endif
+
 FTMotion ftMotion;
 
 void ft_config_t::prep_for_shaper_change() { ftMotion.prep_for_shaper_change(); }
@@ -505,7 +510,52 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
       const float traj_e_delta = traj_e - prev_traj_e; // Extruder delta in mm, always positive for use_advance_lead (printing moves)
       const float e_rate = traj_e_delta * (FTM_FS);    // Extruder velocity in mm/s
 
-      traj_coords.e += e_rate * planner.get_advance_k();
+ #if ENABLED(PA_LOOKAHEAD)
+  (void)e_rate; // Подавляем warning о неиспользуемой переменной
+  static constexpr float INV_Q16 = 1.52587890625e-5f; // 1/65536
+  static constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f);
+  
+  block_t* current_block = stepper.current_block; // Исправлено: обращаемся к полю класса
+  if (current_block && current_block->steps.e > 0 && current_block->millimeters > 0) {
+    // Интерполяция давления на основе прогресса внутри блока
+    float progress = constrain(dist / current_block->millimeters, 0.0f, 1.0f);
+    int32_t progress_q16 = int32_t(progress * 65536.0f);
+    
+    int32_t p_start = current_block->pa_p_start_q16;
+    int32_t p_target = current_block->pa_p_target_q16;
+    int32_t p_q16 = p_start + int32_t(((int64_t)(p_target - p_start) * progress_q16) >> 16);
+    
+    NOMORE(p_q16, MAX_P_Q16);
+    NOLESS(p_q16, -MAX_P_Q16);
+    
+    traj_coords.e += float(p_q16) * INV_Q16;
+  }
+#elif ENABLED(SIMPLIFIED_PA)
+  static constexpr float INV_Q16 = 1.52587890625e-5f;
+  // Математически точный BETA для Backward Euler: dt / (tau + dt). 
+  // FTM_FS обычно 1000Гц (dt=1мс).
+  static constexpr int32_t BETA_Q16 = int32_t((1.0f / (PA_TIME_CONST_MS + 1.0f)) * 65536.0f);
+  static constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f);
+
+  int32_t v_q16 = int32_t(e_rate * 65536.0f);
+  int32_t K_q16 = int32_t(planner.get_advance_k() * 65536.0f);
+  int64_t Kv = (int64_t)K_q16 * v_q16;
+  int32_t Kv_q16 = int32_t(Kv >> 16);
+  
+  int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - BETA_Q16);
+  int64_t p_added   = (int64_t)Kv_q16 * BETA_Q16;
+  int64_t p_new     = (p_decayed + p_added) >> 16;
+  
+  spa_p_q16 = int32_t(p_new);
+  
+  NOMORE(spa_p_q16, MAX_P_Q16);
+  NOLESS(spa_p_q16, -MAX_P_Q16);
+  
+  traj_coords.e += float(spa_p_q16) * INV_Q16;
+ #else
+  // Fallback: стандартный LA Marlin, если SPA выключен
+  traj_coords.e += e_rate * planner.get_advance_k();
+ #endif
 
       #if ENABLED(NONLINEAR_EXTRUSION)
         if (stepper.nle.settings.enabled) {

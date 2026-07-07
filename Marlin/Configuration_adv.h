@@ -1216,7 +1216,7 @@
   #define FTM_SHAPING_ZETA_Z            0.03f   // Zeta used by input shapers for Z axis
   #define FTM_SHAPING_V_TOL_Z           0.05f   // Vibration tolerance used by EI input shapers for Z axis
 
-  //#define FTM_SHAPER_E                        // Include E shaping support
+  #define FTM_SHAPER_E                        // Include E shaping support
                                                 // Required to synchronize extruder with XYZ (better quality)
   #define FTM_DEFAULT_SHAPER_E      ftMotionShaper_NONE // Default shaper mode on Extruder axis
   #define FTM_SHAPING_DEFAULT_FREQ_E   21.0f    // (Hz) Default peak frequency used by input shapers
@@ -1245,7 +1245,7 @@
    * Jolt is the rate of change of acceleration, not related to Marlin's "classic jerk."
    * Ramps acceleration gradually so max acceleration is limited by max speed and distance traveled.
    */
-  #define FTM_CONSTANT_JOLT
+  // #define FTM_CONSTANT_JOLT
   #if ENABLED(FTM_CONSTANT_JOLT)
     #define FTM_DEFAULT_JOLT 250.0f         // (m/s³) Default jolt for constant-jolt trajectory.
                                             // Higher values print faster at the cost of increased resonance and extruder stress
@@ -1253,7 +1253,7 @@
 
   // Block acceleration profile
   // :[ 'TRAPEZOIDAL', 'POLY5', 'POLY6', 'CONSTANT_JOLT' ]
-  #define FTM_TRAJECTORY_TYPE CONSTANT_JOLT   //   TRAPEZOIDAL: Continuous Velocity. Max acceleration is respected.
+  #define FTM_TRAJECTORY_TYPE POLY6         //   TRAPEZOIDAL: Continuous Velocity. Max acceleration is respected.
                                             //         POLY5: Like POLY6 with 1.5x but uses less CPU. Requires FTM_POLYS.
                                             //         POLY6: Continuous Acceleration (aka S_CURVE). Requires FTM_POLYS.
                                             // CONSTANT_JOLT: 7-phase S-curve. Requires FTM_CONSTANT_JOLT.

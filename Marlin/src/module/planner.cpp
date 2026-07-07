@@ -2539,6 +2539,39 @@ bool Planner::_populate_block(
   }
 #endif
 
+#if ENABLED(PA_LOOKAHEAD)
+  block->pa_K_q16 = 0;
+  block->pa_p_start_q16 = 0;
+  block->pa_p_target_q16 = 0;
+
+  if (use_adv_lead && block->steps.e > 0 && block->millimeters > PA_MIN_BLOCK_MM) {
+    block->pa_K_q16 = int32_t(get_advance_k(extruder) * 65536.0f);
+    
+    // Цепляем давление от предыдущего блока в очереди
+    uint8_t prev_idx = block_sub_mod(block_buffer_head, 1);
+    block_t* prev = (prev_idx != block_buffer_tail) ? &block_buffer[prev_idx] : nullptr;
+    block->pa_p_start_q16 = (prev && prev->use_advance_lead) ? prev->pa_p_target_q16 : 0;
+    
+    // Вычисляем целевую скорость экструдера на выходе из блока
+    float ratio_e = (block->millimeters > 0) ? (block->ext_distance_mm.e / block->millimeters) : 0.0f;
+    float v_e_exit = block->nominal_speed * ratio_e; 
+    
+    int32_t v_exit_q16 = int32_t(v_e_exit * 65536.0f);
+    int64_t Kv = (int64_t)block->pa_K_q16 * v_exit_q16;
+    int32_t p_target_ss = int32_t(Kv >> 16); // Установившееся давление (K * V_e)
+    
+    // Коэффициент стремления (альфа) за время блока
+    float T_block_ms = (block->nominal_speed > 0) ? (block->millimeters / block->nominal_speed) * 1000.0f : PA_TIME_CONST_MS;
+    int32_t alpha_q16 = int32_t((T_block_ms / (PA_TIME_CONST_MS + T_block_ms)) * 65536.0f);
+    
+    int32_t delta = p_target_ss - block->pa_p_start_q16;
+    block->pa_p_target_q16 = block->pa_p_start_q16 + int32_t(((int64_t)delta * alpha_q16) >> 16);
+    
+    // Обработка ретрактов и обратного хода
+    if (v_e_exit <= 0 || !dm.e) block->pa_p_target_q16 = 0; 
+  }
+#endif
+
   // Formula for the average speed over a 1 step worth of distance if starting from zero and
   // accelerating at the current limit. Since we can only change the speed every step this is
 
@@ -3439,5 +3472,14 @@ void Planner::set_max_feedrate(const AxisEnum axis, float inMaxFeedrateMMS) {
       if (was_enabled) stepper.wake_up();
     #endif
   }
+
+  #if ENABLED(PA_LOOKAHEAD)
+void Planner::pa_flush_queue() {
+  for (uint8_t i = block_buffer_tail; i != block_buffer_head; i = (i + 1) % BLOCK_BUFFER_SIZE) {
+    block_buffer[i].pa_p_start_q16 = 0;
+    block_buffer[i].pa_p_target_q16 = 0;
+  }
+}
+#endif
 
 #endif

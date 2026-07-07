@@ -605,6 +605,10 @@ class Planner {
       }
     #endif
 
+    #if ENABLED(PA_LOOKAHEAD)
+  static void pa_flush_queue();
+#endif
+
     #if ENABLED(SMOOTH_LIN_ADVANCE)
       static uint32_t get_advance_k_q27(const uint8_t e=motion.extruder) {
         UNUSED(e);
