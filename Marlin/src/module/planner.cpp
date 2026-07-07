@@ -2483,9 +2483,64 @@ bool Planner::_populate_block(
     #endif
   #endif
 
-  #if ANY(SMOOTH_LIN_ADVANCE, FTM_HAS_LIN_ADVANCE)
-    block->use_advance_lead = use_adv_lead;
-  #endif
+#if ANY(SMOOTH_LIN_ADVANCE, FTM_HAS_LIN_ADVANCE)
+  block->use_advance_lead = use_adv_lead;
+#endif
+
+//===========================================================================
+//================== SPA - Simplified Pressure Advance =====================
+//===========================================================================
+#if ENABLED(PA_LOOKAHEAD)
+  // Инициализируем поля PA (на случай, если блок не будет использован для LA)
+  block->pa_p_start_q16 = 0;
+  block->pa_p_target_q16 = 0;
+  block->pa_K_q16 = 0;
+  block->pa_active = false;
+
+  // Применяем Look-ahead только если это حرکت печати (есть шаги E), экструдер крутится вперед (dm.e)
+  // и длина блока достаточна для применения математики
+  if (use_adv_lead && block->steps.e > 0 && block->millimeters >= PA_MIN_BLOCK_MM && dm.e) {
+    block->pa_active = true;
+    
+    // 1. Сохраняем K для этого блока в формате Q16 (защита от смены K на лету)
+    block->pa_K_q16 = int32_t(get_advance_k(extruder) * 65536.0f);
+    
+    // 2. Начальное давление берем из целевого давления предыдущего блока в очереди
+    uint8_t prev_idx = prev_block_index(block_buffer_head);
+    block_t *prev = (movesplanned() > 0) ? &block_buffer[prev_idx] : nullptr;
+    block->pa_p_start_q16 = (prev && prev->pa_active) ? prev->pa_p_target_q16 : 0;
+    
+    // 3. Вычисляем скорость экструдера на выходе из блока (V_e_exit)
+    // Отношение шагов E к общим шагам блока
+    float ratio_e = (block->step_event_count > 0) ? float(block->steps.e) / float(block->step_event_count) : 0.0f;
+    float v_e_exit = block->nominal_speed * ratio_e; 
+    int32_t v_exit_q16 = int32_t(v_e_exit * 65536.0f);
+    
+    // 4. Установившееся давление в конце блока (P_ss = K * V_e_exit)
+    int64_t Kv = (int64_t)block->pa_K_q16 * v_exit_q16;
+    int32_t p_target_ss = int32_t(Kv >> 16);
+    
+    // 5. Коэффициент стремления за время блока (alpha)
+    // Время блока в миллисекундах
+    float T_block_ms = (block->nominal_speed > 0.01f) ? (block->millimeters / block->nominal_speed) * 1000.0f : PA_TIME_CONST_MS;
+    float tau_ms = PA_TIME_CONST_MS;
+    int32_t alpha_q16 = int32_t((T_block_ms / (tau_ms + T_block_ms)) * 65536.0f);
+    
+    // 6. Вычисляем целевое давление на выходе из блока
+    int32_t delta = p_target_ss - block->pa_p_start_q16;
+    block->pa_p_target_q16 = block->pa_p_start_q16 + int32_t(((int64_t)delta * alpha_q16) >> 16);
+    
+    // 7. Симметричное ограничение (защита от переполнения и физически корректные ретракты)
+    constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f);
+    NOMORE(block->pa_p_target_q16, MAX_P_Q16);
+    NOLESS(block->pa_p_target_q16, -MAX_P_Q16);
+    NOMORE(block->pa_p_start_q16, MAX_P_Q16);
+    NOLESS(block->pa_p_start_q16, -MAX_P_Q16);
+  }
+#endif
+
+  // Formula for the average speed over a 1 step worth of distance if starting from zero and
+  // accelerating at the current limit. Since we can only change the speed every step this is
 
   // Formula for the average speed over a 1 step worth of distance if starting from zero and
   // accelerating at the current limit. Since we can only change the speed every step this is a
