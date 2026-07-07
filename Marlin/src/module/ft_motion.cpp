@@ -49,12 +49,12 @@
   #include "../feature/runout.h"
 #endif
 
+FTMotion ftMotion;
+
 #if ENABLED(SIMPLIFIED_PA)
-  static int32_t spa_p_q16 = 0; // Выносим переменную давления на уровень файла
+  static int32_t spa_p_q16 = 0; // Глобальная переменная давления для базового SPA
   void ftmotion_pa_reset_state() { spa_p_q16 = 0; } // Функция сброса для G92
 #endif
-
-FTMotion ftMotion;
 
 void ft_config_t::prep_for_shaper_change() { ftMotion.prep_for_shaper_change(); }
 void ft_config_t::update_shaping_params() { TERN_(HAS_FTM_SHAPING, ftMotion.update_shaping_params()); }

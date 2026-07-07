@@ -2491,84 +2491,53 @@ bool Planner::_populate_block(
 //================== SPA - Simplified Pressure Advance =====================
 //===========================================================================
 #if ENABLED(PA_LOOKAHEAD)
-  // Инициализируем поля PA (на случай, если блок не будет использован для LA)
+  // Инициализируем поля PA
   block->pa_p_start_q16 = 0;
   block->pa_p_target_q16 = 0;
   block->pa_K_q16 = 0;
   block->pa_active = false;
 
-  // Применяем Look-ahead только если это حرکت печати (есть шаги E), экструдер крутится вперед (dm.e)
-  // и длина блока достаточна для применения математики
-  if (use_adv_lead && block->steps.e > 0 && block->millimeters >= PA_MIN_BLOCK_MM && dm.e) {
+  // Применяем Look-ahead только если это حرکت печати (есть шаги E) и экструдер крутится вперед
+  if (use_adv_lead && block->steps.e > 0 && dm.e) {
     block->pa_active = true;
-    
-    // 1. Сохраняем K для этого блока в формате Q16 (защита от смены K на лету)
     block->pa_K_q16 = int32_t(get_advance_k(extruder) * 65536.0f);
-    
-    // 2. Начальное давление берем из целевого давления предыдущего блока в очереди
+
+    // 1. Начальное давление берем из целевого давления предыдущего блока в очереди
     uint8_t prev_idx = prev_block_index(block_buffer_head);
     block_t *prev = (movesplanned() > 0) ? &block_buffer[prev_idx] : nullptr;
     block->pa_p_start_q16 = (prev && prev->pa_active) ? prev->pa_p_target_q16 : 0;
-    
-    // 3. Вычисляем скорость экструдера на выходе из блока (V_e_exit)
-    // Отношение шагов E к общим шагам блока
+
+    // 2. Вычисляем скорость экструдера на ВЫХОДЕ из блока (V_e_exit)
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем exit_speed, а не nominal_speed! 
+    // Если блок тормозит перед углом, exit_speed будет низкой, и давление должно упасть.
     float ratio_e = (block->step_event_count > 0) ? float(block->steps.e) / float(block->step_event_count) : 0.0f;
-    float v_e_exit = block->nominal_speed * ratio_e; 
+    float v_e_exit = block->exit_speed * ratio_e; 
     int32_t v_exit_q16 = int32_t(v_e_exit * 65536.0f);
-    
-    // 4. Установившееся давление в конце блока (P_ss = K * V_e_exit)
+
+    // 3. Установившееся давление в конце блока (P_ss = K * V_e_exit)
     int64_t Kv = (int64_t)block->pa_K_q16 * v_exit_q16;
     int32_t p_target_ss = int32_t(Kv >> 16);
-    
-    // 5. Коэффициент стремления за время блока (alpha)
-    // Время блока в миллисекундах
+
+    // 4. Коэффициент стремления за время блока (alpha)
     float T_block_ms = (block->nominal_speed > 0.01f) ? (block->millimeters / block->nominal_speed) * 1000.0f : PA_TIME_CONST_MS;
     float tau_ms = PA_TIME_CONST_MS;
     int32_t alpha_q16 = int32_t((T_block_ms / (tau_ms + T_block_ms)) * 65536.0f);
-    
-    // 6. Вычисляем целевое давление на выходе из блока
-    int32_t delta = p_target_ss - block->pa_p_start_q16;
-    block->pa_p_target_q16 = block->pa_p_start_q16 + int32_t(((int64_t)delta * alpha_q16) >> 16);
-    
-    // 7. Симметричное ограничение (защита от переполнения и физически корректные ретракты)
+
+    // 5. Вычисляем целевое давление на выходе из блока
+    // ИСПРАВЛЕНИЕ ДЛЯ МИКРО-СЕГМЕНТОВ: не обнуляем давление, а транслируем его дальше!
+    if (block->millimeters < PA_MIN_BLOCK_MM) {
+      block->pa_p_target_q16 = block->pa_p_start_q16; // Просто сохраняем давление, чтобы не было провалов
+    } else {
+      int32_t delta = p_target_ss - block->pa_p_start_q16;
+      block->pa_p_target_q16 = block->pa_p_start_q16 + int32_t(((int64_t)delta * alpha_q16) >> 16);
+    }
+
+    // 6. Симметричное ограничение
     constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f);
     NOMORE(block->pa_p_target_q16, MAX_P_Q16);
     NOLESS(block->pa_p_target_q16, -MAX_P_Q16);
     NOMORE(block->pa_p_start_q16, MAX_P_Q16);
     NOLESS(block->pa_p_start_q16, -MAX_P_Q16);
-  }
-#endif
-
-#if ENABLED(PA_LOOKAHEAD)
-  block->pa_K_q16 = 0;
-  block->pa_p_start_q16 = 0;
-  block->pa_p_target_q16 = 0;
-
-  if (use_adv_lead && block->steps.e > 0 && block->millimeters > PA_MIN_BLOCK_MM) {
-    block->pa_K_q16 = int32_t(get_advance_k(extruder) * 65536.0f);
-    
-    // Цепляем давление от предыдущего блока в очереди
-    uint8_t prev_idx = block_sub_mod(block_buffer_head, 1);
-    block_t* prev = (prev_idx != block_buffer_tail) ? &block_buffer[prev_idx] : nullptr;
-    block->pa_p_start_q16 = (prev && prev->use_advance_lead) ? prev->pa_p_target_q16 : 0;
-    
-    // Вычисляем целевую скорость экструдера на выходе из блока
-    float ratio_e = (block->millimeters > 0) ? (block->ext_distance_mm.e / block->millimeters) : 0.0f;
-    float v_e_exit = block->nominal_speed * ratio_e; 
-    
-    int32_t v_exit_q16 = int32_t(v_e_exit * 65536.0f);
-    int64_t Kv = (int64_t)block->pa_K_q16 * v_exit_q16;
-    int32_t p_target_ss = int32_t(Kv >> 16); // Установившееся давление (K * V_e)
-    
-    // Коэффициент стремления (альфа) за время блока
-    float T_block_ms = (block->nominal_speed > 0) ? (block->millimeters / block->nominal_speed) * 1000.0f : PA_TIME_CONST_MS;
-    int32_t alpha_q16 = int32_t((T_block_ms / (PA_TIME_CONST_MS + T_block_ms)) * 65536.0f);
-    
-    int32_t delta = p_target_ss - block->pa_p_start_q16;
-    block->pa_p_target_q16 = block->pa_p_start_q16 + int32_t(((int64_t)delta * alpha_q16) >> 16);
-    
-    // Обработка ретрактов и обратного хода
-    if (v_e_exit <= 0 || !dm.e) block->pa_p_target_q16 = 0; 
   }
 #endif
 
@@ -3473,13 +3442,6 @@ void Planner::set_max_feedrate(const AxisEnum axis, float inMaxFeedrateMMS) {
     #endif
   }
 
-  #if ENABLED(PA_LOOKAHEAD)
-void Planner::pa_flush_queue() {
-  for (uint8_t i = block_buffer_tail; i != block_buffer_head; i = (i + 1) % BLOCK_BUFFER_SIZE) {
-    block_buffer[i].pa_p_start_q16 = 0;
-    block_buffer[i].pa_p_target_q16 = 0;
-  }
-}
-#endif
+  
 
 #endif
