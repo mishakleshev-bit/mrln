@@ -605,8 +605,13 @@ class Planner {
       }
     #endif
 
-    #if ENABLED(PA_LOOKAHEAD)
-  static void pa_flush_queue();
+     #if ENABLED(PA_LOOKAHEAD)
+ static void pa_flush_queue() {
+   for (uint8_t i = block_buffer_tail; i != block_buffer_head; i = (i + 1) % BLOCK_BUFFER_SIZE) {
+     block_buffer[i].pa_p_start_q16 = 0;
+     block_buffer[i].pa_p_target_q16 = 0;
+   }
+ }
 #endif
 
     #if ENABLED(SMOOTH_LIN_ADVANCE)
