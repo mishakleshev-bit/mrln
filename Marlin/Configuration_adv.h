@@ -4899,3 +4899,26 @@
 
 // Shrink the build for smaller boards by sacrificing some serial feedback
 //#define MARLIN_SMALL_BUILD
+
+
+//===========================================================================
+//==================== SIMPLIFIED PRESSURE ADVANCE (SPA) ===================
+//===========================================================================
+// Pressure advance для Marlin FT Motion v4.3
+// Калькировка Klipper-style через непрерывный EMA-фильтр в ISR
+#if ENABLED(FT_MOTION)
+  #define SIMPLIFIED_PA                   // [ВКЛ] Включаем упрощённый PA
+  #define PA_LOOKAHEAD                    // [ВКЛ] Look-Ahead для планировщика
+  
+  #if ENABLED(SIMPLIFIED_PA)
+    #define PA_MAX_P_MM        2.0f       // Максимальное давление (мм) — симметричный лимит
+                                          // Больше значения = больше запас для резких углов
+    
+    #define PA_TIME_CONST_MS  20.0f       // Tau (постоянная времени в мс)
+                                          // Определяет как быстро давление нарастает/спадает
+                                          // 20мс — хороший старт для PLA Direct Drive
+    
+    #define PA_MIN_BLOCK_MM    0.5f       // Фильтр микро-сегментов (для отладки)
+                                          // Уменьшить до 0.0f после тестов
+  #endif
+#endif

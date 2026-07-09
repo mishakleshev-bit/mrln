@@ -428,6 +428,10 @@ class FTMotion {
 
 }; // class FTMotion
 
+#if ENABLED(SIMPLIFIED_PA)
+  void ftmotion_pa_reset_state();
+#endif
+
 extern FTMotion ftMotion; // Use ftMotion.thing, not FTMotion::thing.
 
 /**

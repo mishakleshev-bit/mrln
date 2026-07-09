@@ -22,6 +22,7 @@
 
 #include "../gcode.h"
 #include "../../module/motion.h"
+#include "../../module/planner.h"
 
 #if ENABLED(I2C_POSITION_ENCODERS)
   #include "../../feature/encoder_i2c.h"
@@ -124,5 +125,9 @@ void GcodeSuite::G92() {
     else if (sync_E) motion.sync_plan_position_e();
   #endif
 
-  IF_DISABLED(DIRECT_STEPPING, motion.report_position());
+IF_DISABLED(DIRECT_STEPPING, motion.report_position());
+
+#if ENABLED(PA_LOOKAHEAD)
+  if (parser.seenval('E')) planner.pa_flush_queue();  // Сброс флагов очереди при G92 E0
+#endif
 }

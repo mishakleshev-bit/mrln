@@ -396,8 +396,13 @@ bool unload_filament(const float unload_length, const bool show_lcd/*=false*/,
   // Disable the Extruder for manual change
   disable_active_extruder();
 
+  #if ENABLED(SIMPLIFIED_PA)
+    extern void ftmotion_pa_reset_state();
+    ftmotion_pa_reset_state();  // Сброс давления при смене филамента
+  #endif
+
   return true;
-}
+  }
 
 // public:
 

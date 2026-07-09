@@ -319,6 +319,12 @@ typedef struct PlannerBlock {
     bool use_advance_lead;                  // Linear / Pressure Advance extrusion
   #endif
 
+  #if ENABLED(PA_LOOKAHEAD)
+    int32_t pa_K_q16;                       // K для этого блока (защита от смены на лету)
+    bool pa_active;                         // Флаг активности SPA
+    bool pa_extruding;                      // Флаг экструзии (steps.e > 0)
+  #endif
+
   #if ENABLED(LIN_ADVANCE)
     #if HAS_ROUGH_LIN_ADVANCE
       uint32_t la_advance_rate;             // The rate at which steps are added whilst accelerating
@@ -1155,6 +1161,14 @@ class Planner {
     #if HAS_WIRED_LCD
       static uint16_t block_buffer_runtime();
       static void clear_block_buffer_runtime();
+    #endif
+
+    #if ENABLED(PA_LOOKAHEAD)
+      static void pa_flush_queue() {
+        for (uint8_t i = block_buffer_tail; i != block_buffer_head; i = (i + 1) % BLOCK_BUFFER_SIZE) {
+        block_buffer[i].pa_active = false;  // Сброс флага для инициализации ISR
+        }
+      }
     #endif
 
     #if HAS_LINEAR_E_JERK

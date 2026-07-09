@@ -632,6 +632,10 @@ class Stepper {
     // Check if the given block is busy or not - Must not be called from ISR contexts
     static bool is_block_busy(const block_t * const block);
 
+    #if ENABLED(PA_LOOKAHEAD)
+      FORCE_INLINE static block_t* get_current_block() { return current_block; }
+    #endif
+
     #if HAS_ZV_SHAPING
       // Check whether the stepper is processing any input shaping echoes
       static bool input_shaping_busy() {

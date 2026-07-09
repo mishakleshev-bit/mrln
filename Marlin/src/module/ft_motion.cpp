@@ -51,6 +51,20 @@
 
 FTMotion ftMotion;
 
+#if ENABLED(SIMPLIFIED_PA)
+  static int32_t spa_p_q16 = 0;                   // Текущее давление в сопле (формат Q16)
+  void ftmotion_pa_reset_state() { spa_p_q16 = 0; } // Сброс давления при разрыве филамента
+  
+  static constexpr float INV_Q16 = 1.52587890625e-5f; // 1.0f / 65536.0f — обратное Q16
+  static constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f); // Лимит давления
+  
+  // Привязка к частоте FTM (не хардкод миллисекунд!)
+  static constexpr float DT_S = 1.0f / float(FTM_FS); 
+  static constexpr float TAU_S = PA_TIME_CONST_MS * 0.001f;
+  static constexpr float BETA = DT_S / (TAU_S + DT_S);
+  static constexpr int32_t BETA_Q16 = int32_t(BETA * 65536.0f);
+#endif
+
 void ft_config_t::prep_for_shaper_change() { ftMotion.prep_for_shaper_change(); }
 void ft_config_t::update_shaping_params() { TERN_(HAS_FTM_SHAPING, ftMotion.update_shaping_params()); }
 
@@ -497,33 +511,75 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
   #define _SET_TRAJ(q) traj_coords.q = startPos.q + ratio.q * dist;
   LOGICAL_AXIS_MAP_LC(_SET_TRAJ);
 
-  #if FTM_HAS_LIN_ADVANCE
-    float traj_e = traj_coords.e;
+#if ENABLED(PA_LOOKAHEAD)
+  // SPA: Непрерывный EMA-фильтр давления в сопле
+  static block_t* last_block = nullptr;
+  block_t* current_block = stepper.get_current_block();
+  
+  // При смене блока НЕ сбрасываем spa_p_q16! Фильтр работает непрерывно.
+  if (current_block != last_block) {
+    last_block = current_block;
+  }
 
-    // Apply LA/NLE only to printing (not retract/unretract) blocks
-    if (use_advance_lead) {
-      const float traj_e_delta = traj_e - prev_traj_e; // Extruder delta in mm, always positive for use_advance_lead (printing moves)
-      const float e_rate = traj_e_delta * (FTM_FS);    // Extruder velocity in mm/s
-
-      traj_coords.e += e_rate * planner.get_advance_k();
-
-      #if ENABLED(NONLINEAR_EXTRUSION)
-        if (stepper.nle.settings.enabled) {
-          const nonlinear_coeff_t &coeff = stepper.nle.settings.coeff;
-          const float multiplier = max(coeff.C, coeff.A * sq(e_rate) + coeff.B * e_rate + coeff.C),
-                      nle_term = traj_e_delta * (multiplier - 1);
-
-          traj_coords.e += nle_term;
-          traj_e += nle_term;
-          startPos.e += nle_term;
-          endPos_prevBlock.e += nle_term;
-        }
-      #endif
+  if (current_block && current_block->pa_active) {
+    // Мгновенная скорость экструдера (мм/с) — дельта позиции между тиками FTM
+    const float e_delta = traj_coords.e - prev_traj_e;
+    const float v_e_mm_s = e_delta * float(FTM_FS);
+    prev_traj_e = traj_coords.e;  // Сохраняем для следующего тика
+    
+    int32_t v_q16 = int32_t(v_e_mm_s * 65536.0f);
+    int32_t K_q16 = current_block->pa_K_q16;
+    int64_t Kv = (int64_t)K_q16 * v_q16;
+    int32_t Kv_q16 = int32_t(Kv >> 16);
+    
+    // Backward Euler (Непрерывный EMA)
+    // p[n] = (1 - β) * p[n-1] + β * K * V_e[n]
+    int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - BETA_Q16);
+    int64_t p_added   = (int64_t)Kv_q16 * BETA_Q16;
+    spa_p_q16 = int32_t((p_decayed + p_added) >> 16);
+    
+    // Симметричный лимитер (глобальные макросы Marlin)
+    NOMORE(spa_p_q16, MAX_P_Q16);
+    NOLESS(spa_p_q16, -MAX_P_Q16);
+    
+    // Инжекция только если идёт экструзия
+    if (current_block->pa_extruding) {
+      // СТРОГО умножение на INV_Q16!
+      traj_coords.e += float(spa_p_q16) * INV_Q16; 
     }
-
-    prev_traj_e = traj_e;
-
-  #endif // FTM_HAS_LIN_ADVANCE
+  }
+#elif ENABLED(SIMPLIFIED_PA)
+  // Fallback без Look-Ahead (чтение K из глобала)
+  const float e_delta = traj_coords.e - prev_traj_e;
+  const float v_e_mm_s = e_delta * float(FTM_FS);
+  prev_traj_e = traj_coords.e;
+  
+  int32_t v_q16 = int32_t(v_e_mm_s * 65536.0f);
+  int32_t K_q16 = int32_t(planner.get_advance_k() * 65536.0f);
+  
+  int64_t Kv = (int64_t)K_q16 * v_q16;
+  int32_t Kv_q16 = int32_t(Kv >> 16);
+  
+  int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - BETA_Q16);
+  int64_t p_added   = (int64_t)Kv_q16 * BETA_Q16;
+  spa_p_q16 = int32_t((p_decayed + p_added) >> 16);
+  
+  NOMORE(spa_p_q16, MAX_P_Q16);
+  NOLESS(spa_p_q16, -MAX_P_Q16);
+  
+  traj_coords.e += float(spa_p_q16) * INV_Q16;
+#else
+  // Стандартный LA Marlin (если SPA отключен)
+  #if FTM_HAS_LIN_ADVANCE
+  float traj_e = traj_coords.e;
+  if (use_advance_lead) {
+    const float traj_e_delta = traj_e - prev_traj_e;
+    const float e_rate = traj_e_delta * (FTM_FS);
+    traj_coords.e += e_rate * planner.get_advance_k();
+  }
+  prev_traj_e = traj_e;
+  #endif
+#endif
 
   // Update shaping parameters if needed.
   switch (cfg.dynFreqMode) {
