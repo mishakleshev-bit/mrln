@@ -28,7 +28,7 @@
  */
 
 #include "../inc/MarlinConfig.h"
-
+#include "../core/millis_t.h"
 #if ENABLED(FT_MOTION)
 
 #include "ft_motion.h"
@@ -512,41 +512,112 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
   LOGICAL_AXIS_MAP_LC(_SET_TRAJ);
 
 #if ENABLED(PA_LOOKAHEAD)
-  // SPA: Непрерывный EMA-фильтр давления в сопле
+  // === SPA: Непрерывный EMA-фильтр + ТЕЛЕМЕТРИЯ ===
+  #if ENABLED(SPA_TELEMETRY)
+    static uint32_t spa_log_counter = 0;
+    static uint32_t spa_block_changes = 0;
+    static millis_t last_spa_telemetry = 0;
+  #endif
   static block_t* last_block = nullptr;
   block_t* current_block = stepper.get_current_block();
   
-  // При смене блока НЕ сбрасываем spa_p_q16! Фильтр работает непрерывно.
+  // ==========================================================
+  // ЧАСТЬ 1: Обработка смены блока
+  // ==========================================================
   if (current_block != last_block) {
+    #if ENABLED(SPA_TELEMETRY)
+      spa_block_changes++;
+    #endif
     last_block = current_block;
-  }
-
-  if (current_block && current_block->pa_active) {
-    // Мгновенная скорость экструдера (мм/с) — дельта позиции между тиками FTM
-    const float e_delta = traj_coords.e - prev_traj_e;
-    const float v_e_mm_s = e_delta * float(FTM_FS);
-    prev_traj_e = traj_coords.e;  // Сохраняем для следующего тика
+    prev_traj_e = traj_coords.e; // Сброс дельты на начале нового блока
     
+    #if ENABLED(SPA_TELEMETRY)
+      if (current_block && current_block->pa_active) {
+        const char* move_type = "OTHER";
+        if (current_block->steps.e == 0) {
+          move_type = "TRAVEL";
+        } else if (current_block->direction_bits.e) {
+          move_type = "PRINT";
+        } else {
+          move_type = "RETRACT";
+        }
+        
+        const float dx_mm = current_block->steps.x * planner.mm_per_step[X_AXIS] * (current_block->direction_bits.x ? 1 : -1);
+        const float dy_mm = current_block->steps.y * planner.mm_per_step[Y_AXIS] * (current_block->direction_bits.y ? 1 : -1);
+        const float dz_mm = current_block->steps.z * planner.mm_per_step[Z_AXIS] * (current_block->direction_bits.z ? 1 : -1);
+        const float de_mm = current_block->steps.e * planner.mm_per_step[E_AXIS_N(current_block->extruder)] * (current_block->direction_bits.e ? 1 : -1);
+        
+        SERIAL_ECHOLN(
+          "BLK|", move_type,
+          " dX=", int32_t(dx_mm * 1000),
+          " dY=", int32_t(dy_mm * 1000),
+          " dZ=", int32_t(dz_mm * 1000),
+          " dE=", int32_t(de_mm * 1000),
+          " F=", int32_t(current_block->nominal_speed),
+          " L=", int32_t(current_block->millimeters * 1000),
+          " K=", current_block->pa_K_q16,
+          " extr=", current_block->pa_extruding,
+          " #=", spa_block_changes
+        );
+      }
+    #endif
+  }
+  
+  // ==========================================================
+  // ЧАСТЬ 2: Математика SPA (EMA Backward Euler)
+  // ==========================================================
+  if (current_block && current_block->pa_active) {
+    // 2.1. Сохраняем базовую позицию ДО инжекции
+    const float base_traj_e = traj_coords.e;
+    const float e_delta = base_traj_e - prev_traj_e;
+    const float v_e_mm_s = e_delta * float(FTM_FS);
+    
+    // 2.2. Расчёт давления
     int32_t v_q16 = int32_t(v_e_mm_s * 65536.0f);
     int32_t K_q16 = current_block->pa_K_q16;
+    
     int64_t Kv = (int64_t)K_q16 * v_q16;
     int32_t Kv_q16 = int32_t(Kv >> 16);
     
-    // Backward Euler (Непрерывный EMA)
-    // p[n] = (1 - β) * p[n-1] + β * K * V_e[n]
     int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - BETA_Q16);
     int64_t p_added   = (int64_t)Kv_q16 * BETA_Q16;
     spa_p_q16 = int32_t((p_decayed + p_added) >> 16);
     
-    // Симметричный лимитер (глобальные макросы Marlin)
+    // 2.3. Симметричный лимитер
     NOMORE(spa_p_q16, MAX_P_Q16);
     NOLESS(spa_p_q16, -MAX_P_Q16);
     
-    // Инжекция только если идёт экструзия
+    // 2.4. Инжекция давления
     if (current_block->pa_extruding) {
-      // СТРОГО умножение на INV_Q16!
-      traj_coords.e += float(spa_p_q16) * INV_Q16; 
+      traj_coords.e += float(spa_p_q16) * INV_Q16;
     }
+    
+    // 2.5. Обновляем prev_traj_e ОТ БАЗОВОЙ позиции (до инжекции!)
+    prev_traj_e = base_traj_e;
+    
+    // ==========================================================
+    // ЧАСТЬ 3: Регулярная телеметрия (каждые 10 мс)
+    // ==========================================================
+    #if ENABLED(SPA_TELEMETRY)
+      spa_log_counter++;
+      if (millis() > last_spa_telemetry) {
+        SERIAL_ECHOLN(
+          "SPA|t=", millis(),
+          " X=", int32_t(traj_coords.x * 100),
+          " Y=", int32_t(traj_coords.y * 100),
+          " Z=", int32_t(traj_coords.z * 100),
+          " E=", int32_t(traj_coords.e * 1000),
+          " P=", spa_p_q16,
+          " K=", K_q16,
+          " Ve=", int32_t(v_e_mm_s * 10),
+          " dE=", int32_t(e_delta * 1000),
+          " extr=", current_block->pa_extruding,
+          " inj=", current_block->pa_extruding ? 1 : 0,
+          " #=", spa_log_counter
+        );
+        last_spa_telemetry = millis() + 10;
+      }
+    #endif
   }
 #elif ENABLED(SIMPLIFIED_PA)
   // Fallback без Look-Ahead (чтение K из глобала)
