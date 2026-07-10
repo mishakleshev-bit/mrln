@@ -2477,7 +2477,7 @@
 
 #if ANY(LIN_ADVANCE, FT_MOTION)
   #if ENABLED(DISTINCT_E_FACTORS)
-    #define ADVANCE_K { 0.22 }    // (mm) Compression length per 1mm/s extruder speed, per extruder. Override with 'M900 T<tool> K<mm>'.
+    #define ADVANCE_K { 0.00 }    // (mm) Compression length per 1mm/s extruder speed, per extruder. Override with 'M900 T<tool> K<mm>'.
   #else
     #define ADVANCE_K 0.00        // (mm) Compression length for all extruders. Override with 'M900 K<mm>'.
   #endif
@@ -4909,13 +4909,13 @@
 #if ENABLED(FT_MOTION)
   #define SIMPLIFIED_PA                   // [ВКЛ] Включаем упрощённый PA
   #define PA_LOOKAHEAD                    // [ВКЛ] Look-Ahead для планировщика
-  #define SPA_TELEMETRY
+  //#define SPA_TELEMETRY
   
   #if ENABLED(SIMPLIFIED_PA)
     #define PA_MAX_P_MM        2.0f       // Максимальное давление (мм) — симметричный лимит
                                           // Больше значения = больше запас для резких углов
     
-    #define PA_TIME_CONST_MS  20.0f       // Tau (постоянная времени в мс)
+    #define PA_TIME_CONST_MS  30.0f       // Tau (постоянная времени в мс)
                                           // Определяет как быстро давление нарастает/спадает
                                           // 20мс — хороший старт для PLA Direct Drive
     
