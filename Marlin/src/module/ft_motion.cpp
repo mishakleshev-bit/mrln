@@ -52,7 +52,7 @@
 FTMotion ftMotion;
 
 #if ENABLED(SIMPLIFIED_PA)
-// === SPA v4.9: Прямая пропорция offset = K × Ve + Dynamic Volumetric SRL ===
+// === SPA v4.10: Прямая пропорция offset = K × Ve + Asymmetric Dynamic Volumetric SRL ===
 int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
 static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve
 static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
@@ -544,7 +544,7 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
 
 #if ENABLED(PA_LOOKAHEAD)
   #if ENABLED(SIMPLIFIED_PA)
-    // === SPA v4.9: Прямая пропорция offset = K × Ve + Dynamic Volumetric SRL ===
+    // === SPA v4.10: Прямая пропорция offset = K × Ve + Asymmetric Dynamic Volumetric SRL ===
     block_t* current_block = stepper.get_current_block();
 
     if (current_block && current_block->pa_active) {
@@ -564,26 +564,33 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
         // (3) Смещение относительно текущего offset (Δoffset = target - current)
         int64_t delta_offset_q16 = target_offset_q16 - spa_pa_offset_q16;
 
-        // (4) Dynamic Volumetric Slew Rate Limiter (v4.9)
+        // (4) Asymmetric Dynamic Volumetric Slew Rate Limiter (SPA v4.10)
         //     Основан на максимальном объёмном расходе хотенда (Q_max, мм³/с).
         //     Ограничение: Ve + d(offset)/dt ≤ V_f_max = Q_max / A_filament
-        //     Асимметричный: разгон (увеличение offset) лимитируется жёстче,
-        //     торможение (уменьшение offset) — мягче.
+        //     Асимметрия: offset растёт → жёсткий SRL (защита от stall),
+        //               offset падает → ослабленный ×SPA_SRL_DECAY_FACTOR.
         if (spa_v_filament_max_q16 > 0) {
           // Текущая скорость филамента: |Ve| в Q16
           const int64_t ve_abs_q16 = (ve_curr_q16 >= 0) ? ve_curr_q16 : -ve_curr_q16;
           // Доступный запас: V_f_max - |Ve|
           const int64_t avail_q16 = spa_v_filament_max_q16 - ve_abs_q16;
-          // Доступный Δoffset/кадр = avail × FTM_TS
-          // δ_max = avail / FTM_FS (avail_q16 уже в Q16, деление сохраняет Q16)
+          // δ_max/кадр = V_f_max / FTM_FS (Q16).
+          // При avail ≤ 0 (overspeed) используем Vf_max/FS как fallback,
+          // чтобы offset мог снижаться (безопасный выход из overspeed).
           const int64_t max_delta_frame_q16 = (avail_q16 > 0)
             ? avail_q16 / int64_t(FTM_FS)
-            : 0;
+            : spa_v_filament_max_q16 / int64_t(FTM_FS);
 
-          if (delta_offset_q16 > max_delta_frame_q16)
-            delta_offset_q16 = max_delta_frame_q16;
-          else if (delta_offset_q16 < -max_delta_frame_q16)
-            delta_offset_q16 = -max_delta_frame_q16;
+          if (delta_offset_q16 > 0) {
+            // Offset растёт: полный SRL — защита от пропуска шагов
+            if (delta_offset_q16 > max_delta_frame_q16)
+              delta_offset_q16 = max_delta_frame_q16;
+          } else {
+            // Offset падает: ослабленный SRL — микронаплывы на notch exit
+            const int64_t decay_limit_q16 = max_delta_frame_q16 * (int64_t)SPA_SRL_DECAY_FACTOR;
+            if (delta_offset_q16 < -decay_limit_q16)
+              delta_offset_q16 = -decay_limit_q16;
+          }
         }
 
         // (5) Применение ограниченного смещения

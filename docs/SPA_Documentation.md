@@ -1,4 +1,4 @@
-# Документация алгоритма SPA (Simplified Pressure Advance) v4.9
+# Документация алгоритма SPA (Simplified Pressure Advance) v4.10
 
 ## Содержание
 
@@ -39,7 +39,7 @@ E_коррекция = K × V_печати × ускорение
 
 Это требует знания ускорения, производной скорости и даёт сильную связь между параметрами движения.
 
-### 1.3 Пропорциональная модель SPA (v4.9+)
+### 1.3 Пропорциональная модель SPA (v4.10+)
 
 **SPA (Simplified Pressure Advance)** реализует **пропорциональную модель** (эквивалент Klipper PA): компенсация вычисляется как прямая пропорция от сырой скорости экструзии:
 
@@ -77,7 +77,7 @@ E_компенсация = K × Ve_raw
 | `FTM_TS` | Период кадра = 1 / FTM_FS | с |
 | `Q16` | Формат фиксированной точки: 16 дробных битов | — |
 
-### 2.2 Уравнения (v4.9)
+### 2.2 Уравнения (v4.10)
 
 **Шаг 1. Вычисление текущей скорости экструзии:**
 ```
@@ -89,7 +89,7 @@ Ve[t] = (E_planned[t] - E_planned[t-1]) × FTM_FS      (1)
 target[t] = K × Ve[t]                                    (2)
 ```
 
-**Шаг 3. Dynamic Volumetric SRL (v4.9):**
+**Шаг 3. Asymmetric Dynamic Volumetric SRL (v4.10):**
 ```
 Δoffset[t] = target[t] - offset[t-1]
 
@@ -135,10 +135,11 @@ E_corrected[t] = E_planned[t] + offset[t]                (4)
 | **Гарантия step loss** | Нет (R=300 даёт 28000 steps/s — мотор не успевает) | **Да** (гарантирует, что Ve + d(offset)/dt ≤ Q_max) |
 | **Размерность** | мм/с (эмпирическая) | мм³/с (физическая, MVS хотенда) |
 
-**Вывод:** v4.9 решает фундаментальную проблему — гарантирует, что **суммарная скорость филамента (Ve + PA offset rate) никогда не превышает физической способности хотенда проплавлять пластик**, независимо от K и ускорения.
+**Вывод:** v4.10 решает фундаментальную проблему — гарантирует, что **суммарная скорость филамента (Ve + PA offset rate) никогда не превышает физической способности хотенда проплавлять пластик**, независимо от K и ускорения.
 
-**Асимметричность:** SRL в v4.9 работает асимметрично
-- **Разгон (Ve растёт):** `avail = V_f_max - |Ve|` уменьшается → лимит растёт медленно
+**Асимметричность:** SRL в v4.10 работает асимметрично с коэффициентом SPA_SRL_DECAY_FACTOR
+- **Offset растёт (Ve растёт):** полный SRL — `δ_max = avail / FTM_FS`, защита от stall
+- **Offset падает (Ve падает):** ослабленный SRL — `δ_max × SPA_SRL_DECAY_FACTOR`, анти-наплыв
 - **Торможение (Ve падает):** `avail` увеличивается → offset может падать быстрее (выдавливание излишка)
 
 ### 2.4 Анализ размерности
@@ -166,11 +167,11 @@ offset [мм] = K [с] × Ve [мм/с] = [мм] ✓
 | `pa_max_offset_q16` | int64_t | offset_max × 65536 | Q16 (0 = без лимита) |
 | `spa_v_filament_max_q16` | int64_t | V_f_max × 65536 = Q_max / A_fil × 65536 | Q16 |
 
-> **v4.9:** Переменные `spa_max_delta_per_frame_q16` и `ftmotion_pa_set_max_rate()` удалены — заменены на Dynamic Volumetric SRL.
+> **v4.10:** Переменные `spa_max_delta_per_frame_q16` и `ftmotion_pa_set_max_rate()` удалены — заменены на Dynamic Volumetric SRL.
 
-### 2.6 Поведение Dynamic Volumetric SRL (v4.9)
+### 2.6 Поведение Asymmetric Dynamic Volumetric SRL (v4.10)
 
-SPA v4.9 использует **прямую пропорцию** `offset = K × Ve_raw` с **Dynamic Volumetric Slew Rate Limiter**, что даёт:
+SPA v4.10 использует **прямую пропорцию** `offset = K × Ve_raw` с **Asymmetric Dynamic Volumetric Slew Rate Limiter**, что даёт:
 
 - **Физически обоснованный лимит**: SRL базируется на MVS хотенда, а не на эмпирически подобранной константе
 - **Автоматическая адаптация**: при низкой Ve (старт разгона) offset растёт быстро; при высокой Ve — медленно; при Ve ≥ V_f_max — только уменьшается
@@ -211,10 +212,10 @@ SPA требует наличия **обоих** макросов в [`Configura
 - `SIMPLIFIED_PA` — управляет глобальными переменными, функциями установки/сброса
 - `PA_LOOKAHEAD` — управляет алгоритмом в `calc_traj_point()` и полями `block_t`
 
-Дополнительные макросы (v4.9):
+Дополнительные макросы (v4.10):
 - ~~`SPA_EMA_ALPHA`~~ — **удалён в v4.7+** (EMA заменён Dynamic Volumetric SRL)
 - ~~`SPA_SOFT_CLAMP`~~ — **устарел в v4.6+** (интегратор устранён, windup невозможен)
-- ~~`SPA_PA_MAX_RATE`~~ — **удалён в v4.9+** (заменён на `SPA_PA_MAX_VOLFLOW`)
+- ~~`SPA_PA_MAX_RATE`~~ — **удалён в v4.10+** (заменён на `SPA_PA_MAX_VOLFLOW`)
 - `SPA_TELEMETRY` — вывод телеметрии
 - `SPA_PEAK_TRACKING` — пиковый offset в телеметрии (Task 3)
 - `SPA_PA_MAX_VOLFLOW` — Dynamic Volumetric SRL (Task 5, мм³/с, по умолч. 15)
@@ -226,7 +227,7 @@ SPA требует наличия **обоих** макросов в [`Configura
 
 ```cpp
 #if ENABLED(SIMPLIFIED_PA)
-// === SPA v4.9: Прямая пропорция offset = K × Ve + Dynamic Volumetric SRL ===
+// === SPA v4.10: Прямая пропорция offset = K × Ve + Asymmetric Dynamic Volumetric SRL ===
 int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
 static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve
 static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
@@ -289,7 +290,7 @@ void ftmotion_pa_reset_state() {
 
 #### Основной алгоритм — [`calc_traj_point()`](Marlin/src/module/ft_motion.cpp:532)
 
-Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`), **v4.9 — прямая пропорция + Dynamic Volumetric SRL**:
+Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`), **v4.10 — прямая пропорция + Asymmetric Dynamic Volumetric SRL**:
 
 ```cpp
 block_t* current_block = stepper.get_current_block();
@@ -308,22 +309,29 @@ if (current_block && current_block->pa_active) {
     // (3) Δoffset = target - current
     int64_t delta_offset_q16 = target_offset_q16 - spa_pa_offset_q16;
 
-    // (T5) Dynamic Volumetric SRL (v4.9) — ограничение по MVS хотенда
+    // (T5) Asymmetric Dynamic Volumetric SRL (SPA v4.10)
+    //     offset растёт → полный SRL (защита от stall),
+    //     offset падает → ослабленный ×SPA_SRL_DECAY_FACTOR (анти-наплыв).
     if (spa_v_filament_max_q16 > 0) {
-      // Текущая скорость филамента: |Ve| в Q16
       const int64_t ve_abs_q16 = (ve_curr_q16 >= 0) ? ve_curr_q16 : -ve_curr_q16;
-      // Доступный запас: V_f_max - |Ve|
       const int64_t avail_q16 = spa_v_filament_max_q16 - ve_abs_q16;
-      // Доступный Δoffset/кадр = avail × FTM_TS
-      // avail_q16 уже в Q16, деление на FTM_FS сохраняет Q16
+      // δ_max/кадр = V_f_max / FTM_FS (Q16).
+      // При avail ≤ 0 (overspeed) используем Vf_max/FS как fallback,
+      // чтобы offset мог снижаться (безопасный выход из overspeed).
       const int64_t max_delta_frame_q16 = (avail_q16 > 0)
         ? avail_q16 / int64_t(FTM_FS)
-        : 0;
+        : spa_v_filament_max_q16 / int64_t(FTM_FS);
 
-      if (delta_offset_q16 > max_delta_frame_q16)
-        delta_offset_q16 = max_delta_frame_q16;
-      else if (delta_offset_q16 < -max_delta_frame_q16)
-        delta_offset_q16 = -max_delta_frame_q16;
+      if (delta_offset_q16 > 0) {
+        // Offset растёт: полный SRL — защита от пропуска шагов
+        if (delta_offset_q16 > max_delta_frame_q16)
+          delta_offset_q16 = max_delta_frame_q16;
+      } else {
+        // Offset падает: ослабленный SRL — микронаплывы на notch exit
+        const int64_t decay_limit_q16 = max_delta_frame_q16 * (int64_t)SPA_SRL_DECAY_FACTOR;
+        if (delta_offset_q16 < -decay_limit_q16)
+          delta_offset_q16 = -decay_limit_q16;
+      }
     }
 
     // (4) Применение ограниченного смещения
@@ -350,13 +358,17 @@ if (current_block && current_block->pa_active) {
 }
 ```
 
-**Ключевые отличия от v4.8:**
+**Ключевые отличия от v4.9:**
 1. **Удалён** константный `spa_max_delta_per_frame_q16` (SPA_PA_MAX_RATE)
-2. **Добавлен** Dynamic Volumetric SRL: `δ_max_кадр = max(0, V_f_max - |Ve|) × FTM_TS`
+2. **Добавлен** Asymmetric Dynamic Volumetric SRL:
+   - `δ_max_кадр = max(0, V_f_max - |Ve|) / FTM_FS` (offset растёт, полный SRL)
+   - `δ_max_кадр = max(0, V_f_max - |Ve|) / FTM_FS × SPA_SRL_DECAY_FACTOR` (offset падает, ослабленный)
 3. **Добавлена** переменная `spa_v_filament_max_q16` — V_f_max на основе `SPA_PA_MAX_VOLFLOW`
 4. **Добавлена** функция `ftmotion_pa_set_max_volflow()` — установка через M900 R (мм³/с)
-5. **Добавлена** асимметричность: разгон (Ve растёт) → жёстче, торможение (Ve падает) → мягче
-6. Физически гарантирует: `Ve + d(offset)/dt ≤ Q_max / A_filament`
+5. **Fallback при overspeed**: при `avail ≤ 0 (Ve ≥ V_f_max)` SRL разрешает падение offset со скоростью `V_f_max / FTM_FS` — безопасный выход из перегруза
+6. Физически гарантирует: `Ve + d(offset)/dt ≤ Q_max / A_filament` (на рост),
+   и `Ve + d(offset)/dt × 8 ≤ Q_max / A_filament` (на падение, factor=8)
+7. **Новая константа**: `SPA_SRL_DECAY_FACTOR` (по умолч. 8) — множитель ветки падения offset
 
 ### 3.5 Вспомогательные структуры данных
 
@@ -396,7 +408,7 @@ PA|K=0.100 Ve=45.2 Off=1.27 OffPeak=1.50
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, ~~`SPA_EMA_ALPHA`~~ (удалён в v4.7), ~~`SPA_SOFT_CLAMP`~~ (устарел в v4.6), ~~`SPA_PA_MAX_RATE`~~ (удалён в v4.9), `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_PA_MAX_VOLFLOW`, `SPA_RETRACT_DECAY` |
+| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, ~~`SPA_EMA_ALPHA`~~ (удалён в v4.7), ~~`SPA_SOFT_CLAMP`~~ (устарел в v4.6), ~~`SPA_PA_MAX_RATE`~~ (удалён в v4.9), `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_PA_MAX_VOLFLOW`, `SPA_SRL_DECAY_FACTOR`, `SPA_RETRACT_DECAY` |
 
 ### 4.2 Ядро SPA
 
@@ -445,7 +457,7 @@ PA|K=0.100 Ve=45.2 Off=1.27 OffPeak=1.50
 
 ### 5.3 Настройка Dynamic Volumetric SRL (Task 5)
 
-**Важнейшее изменение в v4.9:** SRL больше не настраивается произвольной константой. Вместо этого нужно указать **максимальный объёмный расход (MVS)** хотенда для вашего филамента.
+**Важнейшее изменение в v4.10:** SRL больше не настраивается произвольной константой. Вместо этого нужно указать **максимальный объёмный расход (MVS)** хотенда для вашего филамента.
 
 `M900 R<max_volflow_mm3_s>` — установка MVS хотенда:
 
@@ -499,10 +511,13 @@ PA|K=0.100 Ve=45.2 Off=1.27 OffPeak=1.50
 
 ## 6. История изменений
 
-### v4.9 — текущая версия (рекомендуется)
+### v4.10 — текущая версия (рекомендуется)
 
 | Дата | Изменение | Задача |
 |------|-----------|--------|
+| 2026-07-12 | **Asymmetric SRL:** offset растёт → полный SRL, offset падает → ослабленный ×SPA_SRL_DECAY_FACTOR(8). Исправляет микронаплывы на notch exit | v4.10 |
+| 2026-07-12 | **Добавлен** макрос `SPA_SRL_DECAY_FACTOR` (8) — множитель ветки падения offset | Task 5 |
+| 2026-07-12 | **Fallback при overspeed:** при `avail ≤ 0` SRL разрешает падение offset со скоростью `V_f_max / FTM_FS` — безопасный выход из перегруза | v4.10 |
 | 2026-07-11 | **Кардинальная замена SRL:** константный `SPA_PA_MAX_RATE` → **Dynamic Volumetric SRL** на основе MVS хотенда (`SPA_PA_MAX_VOLFLOW`) | v4.9 |
 | 2026-07-11 | Удалён макрос `SPA_PA_MAX_RATE` и переменная `spa_max_delta_per_frame_q16` | Task 5 |
 | 2026-07-11 | Добавлен макрос `SPA_PA_MAX_VOLFLOW` и переменная `spa_v_filament_max_q16` (V_f_max = Q_max / A_fil) | Task 5 |
@@ -560,4 +575,4 @@ PA|K=0.100 Ve=45.2 Off=1.27 OffPeak=1.50
 
 ---
 
-*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.9 реализует пропорциональную модель offset = K·Ve + Dynamic Volumetric SRL (MVS-базированная защита от step loss), с жёстким clamp по PA_MAX_P_MM и Retract Decay, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения. Dynamic Volumetric SRL асимметричен и гарантирует, что суммарный расход никогда не превысит физического MVS хотенда.*
+*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.10 реализует пропорциональную модель offset = K·Ve + Dynamic Volumetric SRL (MVS-базированная защита от step loss), с жёстким clamp по PA_MAX_P_MM и Retract Decay, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения. Dynamic Volumetric SRL асимметричен и гарантирует, что суммарный расход никогда не превысит физического MVS хотенда.*
