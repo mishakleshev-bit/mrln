@@ -430,6 +430,8 @@ class FTMotion {
 
 #if ENABLED(SIMPLIFIED_PA)
   void ftmotion_pa_reset_state();
+  void ftmotion_pa_set_tau_ms(float tau_ms);  // <-- ДОБАВИЛ (установка Tau)
+  float ftmotion_pa_get_tau_ms();             // <-- ДОБАВИЛ (чтение Tau)
 #endif
 
 extern FTMotion ftMotion; // Use ftMotion.thing, not FTMotion::thing.

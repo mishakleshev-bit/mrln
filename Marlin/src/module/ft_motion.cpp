@@ -59,10 +59,17 @@ FTMotion ftMotion;
   static constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f); // Лимит давления
   
   // Привязка к частоте FTM (не хардкод миллисекунд!)
-  static constexpr float DT_S = 1.0f / float(FTM_FS); 
-  static constexpr float TAU_S = PA_TIME_CONST_MS * 0.001f;
-  static constexpr float BETA = DT_S / (TAU_S + DT_S);
-  static constexpr int32_t BETA_Q16 = int32_t(BETA * 65536.0f);
+static constexpr float DT_S = 1.0f / float(FTM_FS);
+static float pa_tau_s = PA_TIME_CONST_MS * 0.001f; // Теперь переменная, а не константа
+static int32_t pa_beta_q16 = int32_t((DT_S / (pa_tau_s + DT_S)) * 65536.0f);
+
+// Функция для смены Tau из G-кода
+void ftmotion_pa_set_tau_ms(float tau_ms) {
+  if (tau_ms < 0.1f) tau_ms = 0.1f; // Защита от деления на ноль
+  pa_tau_s = tau_ms * 0.001f;
+  pa_beta_q16 = int32_t((DT_S / (pa_tau_s + DT_S)) * 65536.0f);
+}
+float ftmotion_pa_get_tau_ms() { return pa_tau_s * 1000.0f; }
 #endif
 
 void ft_config_t::prep_for_shaper_change() { ftMotion.prep_for_shaper_change(); }
@@ -579,8 +586,8 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
     int64_t Kv = (int64_t)K_q16 * v_q16;
     int32_t Kv_q16 = int32_t(Kv >> 16);
     
-    int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - BETA_Q16);
-    int64_t p_added   = (int64_t)Kv_q16 * BETA_Q16;
+    int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - pa_beta_q16);  // <-- ЗАМЕНИЛ BETA_Q16
+    int64_t p_added   = (int64_t)Kv_q16 * pa_beta_q16;               // <-- ЗАМЕНИЛ BETA_Q16
     spa_p_q16 = int32_t((p_decayed + p_added) >> 16);
     
     // 2.3. Симметричный лимитер

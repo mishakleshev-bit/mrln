@@ -114,7 +114,15 @@ void GcodeSuite::M900() {
         echo_value_oor('K');
     }
 
+    #if ENABLED(SIMPLIFIED_PA)
+  if (parser.seenval('S')) {
+    extern void ftmotion_pa_set_tau_ms(float tau_ms);  // Объявляем, что функция есть в другом файле
+    extern float ftmotion_pa_get_tau_ms();             // Объявляем функцию чтения
+    ftmotion_pa_set_tau_ms(parser.value_float());      // Применяем значение из G-кода
+    SERIAL_ECHOLNPGM("SPA Tau: ", ftmotion_pa_get_tau_ms(), " ms"); // Подтверждение в терминал
+  }
   #endif
+  #endif  
 
   #if ENABLED(SMOOTH_LIN_ADVANCE)
     if (parser.seenval('U')) {
