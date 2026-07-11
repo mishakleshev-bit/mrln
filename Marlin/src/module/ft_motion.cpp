@@ -646,11 +646,13 @@ if (ftmotion_pa_k_q16 != 0 && delta_v_q16 != 0) {
   const int64_t delta_e_pa_raw = (int64_t)ftmotion_pa_k_q16 * delta_v_q16;
   const int32_t delta_e_pa_q16 = int32_t(delta_e_pa_raw >> 16);
   
-  // 4. Накопленная компенсация (интеграл ΔE)
-  spa_pa_offset_q16 += delta_e_pa_q16;
-  
-  // 5. Применяем компенсацию к координате E
-  traj_coords.e += float(spa_pa_offset_q16) * (1.0f / 65536.0f);
+// 4. Накопленная компенсация (интеграл ΔE)
+const int32_t old_offset_q16 = spa_pa_offset_q16;  // Сохраняем старый оффсет
+spa_pa_offset_q16 += delta_e_pa_q16;                // Обновляем накопленный оффсет
+
+// 5. Применяем ТОЛЬКО ИЗМЕНЕНИЕ оффсета к координате E (не весь оффсет!)
+const int32_t delta_offset_q16 = spa_pa_offset_q16 - old_offset_q16;
+traj_coords.e += float(delta_offset_q16) * (1.0f / 65536.0f);
 }
 
 // 6. Обновляем prev_traj_e для следующего тика
