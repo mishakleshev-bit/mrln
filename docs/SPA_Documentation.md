@@ -1,4 +1,4 @@
-# Документация алгоритма SPA (Simplified Pressure Advance) v4.5
+# Документация алгоритма SPA (Simplified Pressure Advance) v4.5-beta2
 
 ## Содержание
 
@@ -19,13 +19,13 @@
 
 ```
 Скорость печати:          ───────╱╲───────
-                                    ╲╱
+                                     ╲╱
 Давление в сопле:               ╱──────╲
 (с задержкой)              ╱──────────────╲
 
 Расход пластика:           ╱──╲    ╱──╲
 (с выбросом)              ╱    ╲──╱    ╲
-                            недолив  перелив
+                             недолив  перелив
 ```
 
 ### 1.2 Идея Pressure Advance
@@ -56,6 +56,7 @@ E_компенсация += K × ΔVe
 - Минимальная задержка — один кадр (≈ 100–200 мкс)
 - Мягкое клиппирование (`SPA_SOFT_CLAMP`) — Task 2
 - Плавный сброс offset при ретрактах (`SPA_RETRACT_DECAY`)
+- Per-block K (сохраняется при планировании) — устранён race condition при смене K во время движения
 
 ---
 
@@ -119,7 +120,7 @@ if (offset[t] > offset_max) {
 
 **Шаг 4a. Затухание при ретракте (Retract Decay):**
 ```
-Если не па_extruding:
+Если не pa_extruding:
     offset[t] = offset[t-1] - offset[t-1] >> SPA_RETRACT_DECAY
 ```
 
@@ -222,8 +223,8 @@ int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
 static int32_t spa_ve_prev_q16 = 0;             // Предыдущая сглаженная скорость (Q16)
 static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — EMA
 static int64_t spa_pa_offset_q16 = 0;           // Накопленная компенсация (Q16 в int64_t)
-static int64_t pa_max_offset_q16 = 0;           // Лимит offset (PA_MAX_P_MM × 65536), 0 = без лимита
-int32_t spa_ema_alpha_q16 = 0;                  // Коэффициент EMA (Q16)
+static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f);  // Лимит offset (из конфига)
+int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);       // Коэффициент EMA (Q16) из конфига
 
 #if ENABLED(SPA_PEAK_TRACKING)
   static int64_t spa_peak_offset_q16 = 0;       // Пиковый |offset| за период телеметрии
@@ -231,19 +232,21 @@ int32_t spa_ema_alpha_q16 = 0;                  // Коэффициент EMA (Q
 #endif
 ```
 
+> **Важно:** `spa_ema_alpha_q16` и `pa_max_offset_q16` инициализируются из конфига при старте и НЕ сбрасываются при смене K через M900.
+
 ### 3.4 Основные функции
 
-#### Установка коэффициента `K` — [`ftmotion_pa_set_k()`](Marlin/src/module/ft_motion.cpp:65)
+#### Установка коэффициента `K` — [`ftmotion_pa_set_k()`](Marlin/src/module/ft_motion.cpp:68)
 
 ```cpp
 void ftmotion_pa_set_k(float k_new) {
   ftmotion_pa_k_q16 = int32_t(k_new * 65536.0f);
-  pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f);
-  spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);  // Инициализация EMA
 }
 ```
 
-#### Установка лимита offset — [`ftmotion_pa_set_max_offset()`](Marlin/src/module/ft_motion.cpp:72) (Task 4)
+Вызывается из `planner.set_advance_k()` (синхронизация SPA с extruder_advance_K[]).
+
+#### Установка лимита offset — [`ftmotion_pa_set_max_offset()`](Marlin/src/module/ft_motion.cpp:80) (Task 4)
 
 ```cpp
 void ftmotion_pa_set_max_offset(float max_offset_mm) {
@@ -253,7 +256,7 @@ void ftmotion_pa_set_max_offset(float max_offset_mm) {
 
 Управляется через `M900 L<value>`. Диапазон: 0.1–10.0 мм.
 
-#### Установка EMA-альфа — [`ftmotion_pa_set_ema_alpha()`](Marlin/src/module/ft_motion.cpp:77) (Task 1)
+#### Установка EMA-альфа — [`ftmotion_pa_set_ema_alpha()`](Marlin/src/module/ft_motion.cpp:85) (Task 1)
 
 ```cpp
 void ftmotion_pa_set_ema_alpha(float alpha) {
@@ -264,7 +267,7 @@ void ftmotion_pa_set_ema_alpha(float alpha) {
 
 Управляется через `M900 E<alpha>`. Диапазон: 0.0–1.0.
 
-#### Сброс состояния — [`ftmotion_pa_reset_state()`](Marlin/src/module/ft_motion.cpp:83)
+#### Сброс состояния — [`ftmotion_pa_reset_state()`](Marlin/src/module/ft_motion.cpp:91)
 
 ```cpp
 void ftmotion_pa_reset_state() {
@@ -277,65 +280,64 @@ void ftmotion_pa_reset_state() {
 }
 ```
 
-#### Основной алгоритм — [`calc_traj_point()`](Marlin/src/module/ft_motion.cpp:542)
+#### Основной алгоритм — [`calc_traj_point()`](Marlin/src/module/ft_motion.cpp:547)
+
+Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`):
 
 ```cpp
-// Внутри FTMotion::calc_traj_point(), секция SIMPLIFIED_PA:
+block_t* current_block = stepper.get_current_block();
 
-#if ENABLED(PA_LOOKAHEAD)
-  #if ENABLED(SIMPLIFIED_PA)
-    if (current_block && current_block->pa_active) {
-      const float e_planned = traj_coords.e;
+if (current_block && current_block->pa_active) {
+  const int32_t block_K_q16 = current_block->pa_K_q16;      // Per-block K
+  const float e_planned = traj_coords.e;
 
-      // (1) Ve_raw в Q16
-      const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * FTM_FS);
+  // (1) Ve_raw в Q16
+  const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * FTM_FS);
 
-      // (T1) EMA-фильтр: ve_smooth += alpha * (ve_raw - ve_smooth)
-      const int32_t ve_diff_q16 = ve_curr_raw_q16 - spa_ve_smooth_q16;
-      spa_ve_smooth_q16 += int32_t((int64_t(spa_ema_alpha_q16) * int64_t(ve_diff_q16)) >> 16);
+  // (T1) EMA-фильтр: ve_smooth += alpha * (ve_raw - ve_smooth)
+  const int32_t ve_diff_q16 = ve_curr_raw_q16 - spa_ve_smooth_q16;
+  spa_ve_smooth_q16 += int32_t((int64_t(spa_ema_alpha_q16) * int64_t(ve_diff_q16)) >> 16);
 
-      // ΔVe от сглаженной скорости
-      const int32_t dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16;
+  // ΔVe от сглаженной скорости
+  const int32_t dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16;
 
-      // (3) Δoffset = K × ΔVe
-      const int64_t pa_delta_q16 = ((int64_t)ftmotion_pa_k_q16 * (int64_t)dve_q16) >> 16;
+  // (2) Δoffset = K × ΔVe
+  const int64_t pa_delta_q16 = ((int64_t)block_K_q16 * (int64_t)dve_q16) >> 16;
 
-      if (current_block->pa_extruding) {
-        spa_pa_offset_q16 += pa_delta_q16;
+  if (current_block->pa_extruding) {
+    spa_pa_offset_q16 += pa_delta_q16;
 
-        // (4) Клиппинг (жёсткий или мягкий)
-        if (pa_max_offset_q16 > 0) {
-          #if ENABLED(SPA_SOFT_CLAMP)
-            // Мягкое клиппирование: затухание превышения
-            if (spa_pa_offset_q16 > pa_max_offset_q16) {
-              const int64_t excess_q16 = spa_pa_offset_q16 - pa_max_offset_q16;
-              spa_pa_offset_q16 = pa_max_offset_q16 + (excess_q16 >> 1);
-            }
-            else if (spa_pa_offset_q16 < -pa_max_offset_q16) {
-              const int64_t excess_q16 = -pa_max_offset_q16 - spa_pa_offset_q16;
-              spa_pa_offset_q16 = -pa_max_offset_q16 - (excess_q16 >> 1);
-            }
-          #else
-            // Жёсткий clamp (оригинальное поведение)
-            if (spa_pa_offset_q16 > pa_max_offset_q16) ...
-            if (spa_pa_offset_q16 < -pa_max_offset_q16) ...
-          #endif
+    // (3) Клиппинг (жёсткий или мягкий)
+    if (pa_max_offset_q16 > 0) {
+      #if ENABLED(SPA_SOFT_CLAMP)
+        // Мягкое клиппирование: затухание превышения
+        if (spa_pa_offset_q16 > pa_max_offset_q16) {
+          const int64_t excess_q16 = spa_pa_offset_q16 - pa_max_offset_q16;
+          spa_pa_offset_q16 = pa_max_offset_q16 + (excess_q16 >> 1);
         }
-      }
-      else {
-        // (4a) Retract Decay: затухание при ретракте
-        #if SPA_RETRACT_DECAY > 0
-          spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
-        #endif
-      }
-
-      // (5) Обновление prev и применение offset
-      spa_ve_prev_q16 = spa_ve_smooth_q16;
-      prev_traj_e = e_planned;
-      traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
+        else if (spa_pa_offset_q16 < -pa_max_offset_q16) {
+          const int64_t excess_q16 = -pa_max_offset_q16 - spa_pa_offset_q16;
+          spa_pa_offset_q16 = -pa_max_offset_q16 - (excess_q16 >> 1);
+        }
+      #else
+        // Жёсткий clamp
+        if (spa_pa_offset_q16 > pa_max_offset_q16) ...
+        if (spa_pa_offset_q16 < -pa_max_offset_q16) ...
+      #endif
     }
-  #endif
-#endif
+  }
+  else {
+    // (4) Retract Decay: затухание при ретракте
+    #if SPA_RETRACT_DECAY > 0
+      spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
+    #endif
+  }
+
+  // (5) Обновление prev и применение offset
+  spa_ve_prev_q16 = spa_ve_smooth_q16;
+  prev_traj_e = e_planned;
+  traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
+}
 ```
 
 ### 3.5 Вспомогательные структуры данных
@@ -348,6 +350,13 @@ void ftmotion_pa_reset_state() {
   bool pa_active;             // Флаг активности SPA для блока
   bool pa_extruding;          // Флаг: есть шаги экструдера (steps.e > 0)
 #endif
+```
+
+Поля инициализируются в [`planner.cpp:2490`](Marlin/src/module/planner.cpp:2490):
+```cpp
+block->pa_K_q16 = int32_t(planner.get_advance_k(extruder) * 65536.0f);
+block->pa_active = true;
+block->pa_extruding = (block->steps.e > 0);
 ```
 
 ### 3.6 Телеметрия (Task 3)
@@ -369,32 +378,32 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | 4904–4940 | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, `SPA_EMA_ALPHA`, `SPA_SOFT_CLAMP`, `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_RETRACT_DECAY` |
+| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, `SPA_EMA_ALPHA`, `SPA_SOFT_CLAMP`, `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_RETRACT_DECAY` |
 
 ### 4.2 Ядро SPA
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`ft_motion.h`](Marlin/src/module/ft_motion.h:433) | 433–445 | Объявления: `ftmotion_pa_k_q16`, `spa_ema_alpha_q16`, функции установки/чтения |
-| [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:54) | 54–95 | Глобальные переменные и функции установки/сброса |
-| [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:542) | 542–610 | Основной алгоритм в `calc_traj_point()` |
+| [`ft_motion.h`](Marlin/src/module/ft_motion.h:433) | Объявления: `ftmotion_pa_k_q16`, `spa_ema_alpha_q16`, функции установки/чтения |
+| [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:54) | Глобальные переменные и функции установки/сброса |
+| [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:547) | Основной алгоритм в `calc_traj_point()` |
 
 ### 4.3 Планировщик (block_t)
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`planner.h`](Marlin/src/module/planner.h:322) | 322–326 | Поля block_t: `pa_K_q16`, `pa_active`, `pa_extruding` |
-| [`planner.h`](Marlin/src/module/planner.h:1166) | 1166–1172 | `pa_flush_queue()` — сброс флагов в очереди |
-| [`planner.cpp`](Marlin/src/module/planner.cpp:2489) | 2489–2493 | Инициализация полей SPA в `buffer_segment()` |
+| [`planner.h`](Marlin/src/module/planner.h:322) | Поля block_t: `pa_K_q16`, `pa_active`, `pa_extruding` |
+| [`planner.h`](Marlin/src/module/planner.h:1166) | `pa_flush_queue()` — сброс флагов в очереди |
+| [`planner.cpp`](Marlin/src/module/planner.cpp:2489) | Инициализация полей SPA в `buffer_segment()` |
 
 ### 4.4 Внешние вызовы
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`M900.cpp`](Marlin/src/gcode/feature/advance/M900.cpp:122) | 122–150 | `M900 K<value> L<value> E<alpha>` — установка параметров |
-| [`G92.cpp`](Marlin/src/gcode/geometry/G92.cpp:134) | 134–139 | `G92 E0` — сброс состояния SPA + флагов очереди |
-| [`pause.cpp`](Marlin/src/feature/pause.cpp:399) | 399–402 | Пауза / M600 — сброс состояния SPA |
-| [`stepper.h`](Marlin/src/module/stepper.h:635) | 635–637 | `get_current_block()` — доступ к текущему блоку |
+| [`M900.cpp`](Marlin/src/gcode/feature/advance/M900.cpp) | `M900 K<value> L<value> E<alpha>` — установка параметров |
+| [`G92.cpp`](Marlin/src/gcode/geometry/G92.cpp) | `G92 E0` — сброс состояния SPA + флагов очереди |
+| [`pause.cpp`](Marlin/src/feature/pause.cpp) | Пауза / M600 — сброс состояния SPA |
+| [`stepper.h`](Marlin/src/module/stepper.h) | `get_current_block()` — доступ к текущему блоку |
 
 ---
 
@@ -404,13 +413,17 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 1. Отправьте `M900` без параметров — ответ должен содержать `Advance K=<значение>`
 2. При включённой `SPA_TELEMETRY` в терминале должны отображаться строки `PA|K=...`
-3. При изменении K через `M900 K0.15` должен прийти ответ `SPA K set to 0.15 s`
+3. При изменении K через `M900 K0.15` должен измениться `Advance K` в отчёте
 
 ### 5.2 Настройка K
 
 Рекомендуемый метод: печать PA-башни с изменением K от 0.00 до 0.30.
 
 Типичные значения: 0.05–0.30 в зависимости от вязкости пластика, длины хотэнда, скорости печати.
+
+> **Важно:** В G-code команда `M900` чувствительна к регистру. Используйте **латинскую** букву `K`:
+> - ✅ `M900 K0.10` — правильно
+> - ❌ `M900 К0.10` — неправильно (кириллическая `К` не распознаётся)
 
 ### 5.3 Настройка EMA-фильтра (Task 1)
 
@@ -457,30 +470,31 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 ## 6. История изменений
 
-### v4.5 — текущая версия (аудит-доработка)
+### v4.5-beta2 — текущая версия
 
 | Дата | Изменение | Задача |
 |------|-----------|--------|
-| 2026-07-11 | Добавлен EMA-фильтр низких частот для Ve (`SPA_EMA_ALPHA`) | Task 1 |
-| 2026-07-11 | Добавлена переменная `spa_ve_smooth_q16` для сглаженной скорости | Task 1 |
-| 2026-07-11 | Добавлена функция `ftmotion_pa_set_ema_alpha()` (M900 E) | Task 1 |
-| 2026-07-11 | Добавлено мягкое клиппирование (`SPA_SOFT_CLAMP`) | Task 2 |
-| 2026-07-11 | Мягкое клиппирование: экспоненциальное затухание превышения offset | Task 2 |
-| 2026-07-11 | Добавлен пиковый offset в телеметрию (`SPA_PEAK_TRACKING`) | Task 3 |
-| 2026-07-11 | Телеметрия выводит OffPeak и alpha | Task 3 |
-| 2026-07-11 | Добавлен динамический PA_MAX_P_MM (`ftmotion_pa_set_max_offset()`, M900 L) | Task 4 |
-| 2026-07-11 | Добавлен Retract Decay (`SPA_RETRACT_DECAY`) — плавный сброс offset при ретрактах | Аудит §3.2 |
-| 2026-07-11 | `ftmotion_pa_reset_state()` теперь сбрасывает также `spa_ve_smooth_q16` и `spa_peak_offset_q16` | Сопровождение |
+| 2026-07-11 | Исправлен баг: `spa_ema_alpha_q16` не инициализировался из `SPA_EMA_ALPHA` (всегда 0) | Аудит |
+| 2026-07-11 | Исправлен баг: `pa_max_offset_q16` не инициализировался из `PA_MAX_P_MM` (всегда 0) | Аудит |
+| 2026-07-11 | Исправлена гонка: K теперь читается из `current_block->pa_K_q16`, а не из глобального `ftmotion_pa_k_q16` | Аудит |
+| 2026-07-11 | Удалён мёртвый код: `static block_t* last_block` в `calc_traj_point()` | Аудит |
+| 2026-07-11 | Удалён дублирующийся блок SPA в M900.cpp, который вызывал `ftmotion_pa_set_k()` напрямую, минуя `extruder_advance_K[]` | Аудит |
+| 2026-07-11 | Явная инициализация SPA K в `settings.cpp` при загрузке конфига | Аудит |
+| 2026-07-01 | Добавлен EMA-фильтр низких частот для Ve (`SPA_EMA_ALPHA`) | Task 1 |
+| 2026-07-01 | Добавлена функция `ftmotion_pa_set_ema_alpha()` (M900 E) | Task 1 |
+| 2026-07-01 | Добавлено мягкое клиппирование (`SPA_SOFT_CLAMP`) | Task 2 |
+| 2026-07-01 | Добавлен пиковый offset в телеметрию (`SPA_PEAK_TRACKING`) | Task 3 |
+| 2026-07-01 | Добавлен динамический PA_MAX_P_MM (`M900 L<value>`) | Task 4 |
+| 2026-07-01 | Добавлен Retract Decay (`SPA_RETRACT_DECAY`) | v4.5 |
 
 ### v4.4
 
 | Дата | Изменение | Автор |
 |------|-----------|-------|
-| 2026-07-11 | Раскомментирован `#define PA_LOOKAHEAD` — исправлен мёртвый код алгоритма | Аудит |
-| 2026-07-11 | `spa_pa_offset_q16`: int32_t → int64_t — защита от переполнения | Аудит |
-| 2026-07-11 | Добавлена `pa_max_offset_q16` — клиппинг offset по `PA_MAX_P_MM` | Аудит |
-| 2026-07-11 | Инициализация лимита offset в `ftmotion_pa_set_k()` | Аудит |
+| 2026-07-01 | Раскомментирован `#define PA_LOOKAHEAD` — исправлен мёртвый код алгоритма | Аудит |
+| 2026-07-01 | `spa_pa_offset_q16`: int32_t → int64_t — защита от переполнения | Аудит |
+| 2026-07-01 | Добавлена `pa_max_offset_q16` — клиппинг offset по `PA_MAX_P_MM` | Аудит |
 
 ---
 
-*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.5 реализует дифференциальную модель (K·ΔVe) с EMA-сглаживанием скорости, мягким клиппированием и динамическим лимитом offset, работающую в фиксированном временном кадре FT Motion.*
+*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.5 реализует дифференциальную модель (K·ΔVe) с EMA-сглаживанием скорости, мягким клиппированием и динамическим лимитом offset, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения.*

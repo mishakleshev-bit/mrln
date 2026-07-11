@@ -51,7 +51,6 @@
  *  U<tau>      Set a tau value for LA smoothing
  */
 void GcodeSuite::M900() {
-
   auto echo_value_oor = [](const char ltr, const bool ten=true) {
     SERIAL_CHAR('?', ltr);
     SERIAL_ECHOPGM(" value out of range");
@@ -119,16 +118,10 @@ void GcodeSuite::M900() {
         echo_value_oor('K');
     }
 
+// SPA-специфичные команды (L, E, S) обрабатываются в отдельных блоках
+// K обрабатывается стандартным механизмом planner.set_advance_k(),
+// который уже вызывает ftmotion_pa_set_k() через #if ENABLED(SIMPLIFIED_PA)
 #if ENABLED(SIMPLIFIED_PA)
-if (parser.seenval('K')) {
-  const float k = parser.value_float();
-  if (WITHIN(k, 0.0f, 2.0f)) {
-    ftmotion_pa_set_k(k);
-    SERIAL_ECHOLNPGM("SPA K set to ", k, " s");
-  } else {
-    SERIAL_ECHOLNPGM("!K out of range (0.0-2.0)");
-  }
-}
 // Task 4: Динамический PA_MAX_P_MM через M900 L<value>
 if (parser.seenval('L')) {
   const float l = parser.value_float();
@@ -167,7 +160,9 @@ if (parser.seenval('S')) {
 
   if (newK != oldK || TERN0(SMOOTH_LIN_ADVANCE, newU != oldU)) {
     planner.synchronize();
-    if (newK != oldK) planner.set_advance_k(newK, tool_index);
+    if (newK != oldK) {
+      planner.set_advance_k(newK, tool_index);
+    }
     #if ENABLED(SMOOTH_LIN_ADVANCE)
       if (newU != oldU) stepper.set_advance_tau(newU, tool_index);
     #endif

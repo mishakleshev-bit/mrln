@@ -57,18 +57,17 @@ int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
 static int32_t spa_ve_prev_q16 = 0;             // Предыдущая скорость экструзии (Q16)
 static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — Task 1: EMA-фильтр
 static int64_t spa_pa_offset_q16 = 0;           // Накопленная компенсация PA (Q16 в int64_t)
-static int64_t pa_max_offset_q16 = 0;           // Лимит offset (PA_MAX_P_MM × 65536), 0 = без лимита
-int32_t spa_ema_alpha_q16 = 0;                  // Коэффициент EMA (Q16), инициализируется при старте
+static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
+int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);      // Коэффициент EMA (Q16) из конфига
 
 #if ENABLED(SPA_PEAK_TRACKING)
   static int64_t spa_peak_offset_q16 = 0;       // Пиковый |offset| за период телеметрии — Task 3
 #endif
 
-// Установка K из G-кода (вызов из M900.cpp)
+// Установка K из G-кода (вызов из M900.cpp и planner.set_advance_k())
 void ftmotion_pa_set_k(float k_new) {
   ftmotion_pa_k_q16 = int32_t(k_new * 65536.0f);
-  pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f);
-  spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);  // Task 1: инициализация EMA
+  // pa_max_offset_q16 и spa_ema_alpha_q16 инициализируются при старте и не сбрасываются при изменении K
 }
 
 // Task 4: Установка PA_MAX_P_MM в рантайме (M900 L<value>)
@@ -296,6 +295,7 @@ void FTMotion::reset() {
     last_traj_dir.reset();
     hold_frames.reset();
   #endif
+  TERN_(SIMPLIFIED_PA, ftmotion_pa_reset_state());  // Синхронизация состояния SPA при сбросе
   if (did_suspend) stepper.wake_up();
 }
 
@@ -542,19 +542,16 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
 #if ENABLED(PA_LOOKAHEAD)
   #if ENABLED(SIMPLIFIED_PA)
     // === SPA v4.5: Дифференциальная модель (K·ΔVe) + EMA сглаживание + soft-clamp ===
-    // Переменные (ftmotion_pa_k_q16, spa_ve_prev_q16, spa_ve_smooth_q16, spa_pa_offset_q16) объявлены на уровне файла
-    static block_t* last_block = nullptr;
     block_t* current_block = stepper.get_current_block();
 
-    if (current_block != last_block) {
-      last_block = current_block;
-    }
-
     if (current_block && current_block->pa_active) {
+      // Используем K, сохранённый в блоке при планировании (planner.cpp:2490),
+      // чтобы избежать race condition при смене K во время движения.
+      const int32_t block_K_q16 = current_block->pa_K_q16;
       const float e_planned = traj_coords.e;
 
       // (1) Текущая скорость экструзии Ve [мм/с] в Q16
-      const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * FTM_FS);
+      const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
 
       // (T1) EMA-фильтр низких частот для Ve — Task 1: PA Smoothing
       // spa_ve_smooth = alpha * ve_curr + (1-alpha) * spa_ve_smooth
@@ -566,7 +563,8 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
       const int32_t dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16;
 
       // (2) Приращение компенсации [Δoffset = K × dVe]
-      const int64_t pa_delta_q16 = ((int64_t)ftmotion_pa_k_q16 * (int64_t)dve_q16) >> 16;
+      // Используем block_K_q16 (из блока), а не глобальный ftmotion_pa_k_q16
+      const int64_t pa_delta_q16 = ((int64_t)block_K_q16 * (int64_t)dve_q16) >> 16;
 
       if (current_block->pa_extruding) {
         // (3) Накопление offset в int64_t для защиты от переполнения
@@ -575,17 +573,14 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
         // (4) Клиппинг — выбор между жёстким и мягким (Task 2)
         if (pa_max_offset_q16 > 0) {
           #if ENABLED(SPA_SOFT_CLAMP)
-            // Task 2: Мягкое клиппирование (Soft Saturation / Anti-Windup)
-            // Вместо жёсткой обрезки, экспоненциально затухаем превышение.
+            // Мягкое клиппирование (Soft Saturation / Anti-Windup)
             // Если offset превышает лимит, накопление замедляется на 50%,
             // и offset возвращается к лимиту с экспоненциальной скоростью.
             if (spa_pa_offset_q16 > pa_max_offset_q16) {
-              // Превышение вверх: уменьшаем delta на 50% + возвращаем к лимиту
               const int64_t excess_q16 = spa_pa_offset_q16 - pa_max_offset_q16;
               spa_pa_offset_q16 = pa_max_offset_q16 + (excess_q16 >> 1);
             }
             else if (spa_pa_offset_q16 < -pa_max_offset_q16) {
-              // Превышение вниз
               const int64_t excess_q16 = -pa_max_offset_q16 - spa_pa_offset_q16;
               spa_pa_offset_q16 = -pa_max_offset_q16 - (excess_q16 >> 1);
             }
@@ -597,10 +592,8 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
         }
       }
       else {
-        // Task 4: Плавный сброс offset при ретрактах (Retract Decay)
+        // (4a) Retract Decay: плавный сброс offset при ретрактах
         #if SPA_RETRACT_DECAY > 0
-          // При !pa_extruding offset затухает: offset -= offset >> SPA_RETRACT_DECAY
-          // При SPA_RETRACT_DECAY=4: offset уменьшается на ~1/16 каждый кадр
           spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
         #endif
       }
@@ -611,31 +604,6 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
 
       // (6) Применение компенсации (Q16 → float)
       traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
-
-      // (7) Телеметрия — Task 3
-      #if ENABLED(SPA_TELEMETRY)
-        static millis_t last_telem = 0;
-        if (millis() > last_telem) {
-          // Пиковый offset (Task 3)
-          #if ENABLED(SPA_PEAK_TRACKING)
-            const int64_t abs_off = spa_pa_offset_q16 > 0 ? spa_pa_offset_q16 : -spa_pa_offset_q16;
-            if (abs_off > spa_peak_offset_q16) spa_peak_offset_q16 = abs_off;
-            SERIAL_ECHOLN("PA|K=",       ftmotion_pa_k_q16 / 65536.0f,
-                          " Ve=",         (float)spa_ve_smooth_q16 * (1.0f / 65536.0f),
-                          " dVe=",        dve_q16 / 65536.0f,
-                          " Off=",        (float)spa_pa_offset_q16 * (1.0f / 65536.0f),
-                          " OffPeak=",    (float)spa_peak_offset_q16 * (1.0f / 65536.0f),
-                          " alpha=",      spa_ema_alpha_q16 / 65536.0f);
-            spa_peak_offset_q16 = 0;  // сброс пика после отчёта
-          #else
-            SERIAL_ECHOLN("PA|K=", ftmotion_pa_k_q16 / 65536.0f,
-                          " Ve=",  (float)spa_ve_smooth_q16 * (1.0f / 65536.0f),
-                          " dVe=", dve_q16 / 65536.0f,
-                          " Off=", (float)spa_pa_offset_q16 * (1.0f / 65536.0f));
-          #endif
-          last_telem = millis() + 50;
-        }
-      #endif
     }
   #else
     // Стандартный LA Marlin (если PA_LOOKAHEAD включён, но SIMPLIFIED_PA выключен)
