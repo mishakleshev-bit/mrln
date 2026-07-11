@@ -52,12 +52,10 @@
 FTMotion ftMotion;
 
 #if ENABLED(SIMPLIFIED_PA)
-// === SPA v4.6: Прямая пропорция offset = K × Ve_smooth (эквивалентно Klipper PA) ===
+// === SPA v4.7: Прямая пропорция offset = K × Ve (без EMA, Ve — сырая скорость 5 кГц) ===
 int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
-static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — EMA-фильтр
-static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve_smooth
+static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve
 static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
-int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);      // Коэффициент EMA (Q16) из конфига
 
 #if ENABLED(SPA_PEAK_TRACKING)
   static int64_t spa_peak_offset_q16 = 0;       // Пиковый |offset| за период телеметрии — Task 3
@@ -66,7 +64,7 @@ int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);      // Коэф�
 // Установка K из G-кода (вызов из M900.cpp и planner.set_advance_k())
 void ftmotion_pa_set_k(float k_new) {
   ftmotion_pa_k_q16 = int32_t(k_new * 65536.0f);
-  // pa_max_offset_q16 и spa_ema_alpha_q16 инициализируются при старте и не сбрасываются при изменении K
+  // pa_max_offset_q16 инициализируется при старте и не сбрасывается при изменении K
 }
 
 // Task 4: Установка PA_MAX_P_MM в рантайме (M900 L<value>)
@@ -74,15 +72,8 @@ void ftmotion_pa_set_max_offset(float max_offset_mm) {
   pa_max_offset_q16 = int64_t(max_offset_mm * 65536.0f);
 }
 
-// Task 1: Установка EMA-альфа в рантайме (M900 E<alpha>)
-void ftmotion_pa_set_ema_alpha(float alpha) {
-  LIMIT(alpha, 0.0f, 1.0f);
-  spa_ema_alpha_q16 = int32_t(alpha * 65536.0f);
-}
-
 // Сброс состояния PA (вызывается при G92 E0, M600, разрыве филамента)
 void ftmotion_pa_reset_state() {
-  spa_ve_smooth_q16 = 0;
   spa_pa_offset_q16 = 0;
   #if ENABLED(SPA_PEAK_TRACKING)
     spa_peak_offset_q16 = 0;
@@ -549,17 +540,11 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
       const float e_planned = traj_coords.e;
 
       // (1) Текущая скорость экструзии Ve [мм/с] в Q16
-      const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
-
-      // (T1) EMA-фильтр низких частот для Ve — Task 1: PA Smoothing
-      // spa_ve_smooth = alpha * ve_curr + (1-alpha) * spa_ve_smooth
-      // В Q16: ve_smooth += alpha * (ve_curr - ve_smooth)
-      const int32_t ve_diff_q16 = ve_curr_raw_q16 - spa_ve_smooth_q16;
-      spa_ve_smooth_q16 += int32_t((int64_t(spa_ema_alpha_q16) * int64_t(ve_diff_q16)) >> 16);
+      const int32_t ve_curr_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
 
       if (current_block->pa_extruding) {
-        // (2) Прямая пропорция: offset = K × Ve_smooth (без интегратора, без фазовой задержки)
-        const int64_t pa_offset_new_q16 = ((int64_t)block_K_q16 * (int64_t)spa_ve_smooth_q16) >> 16;
+        // (2) Прямая пропорция: offset = K × Ve_raw (без EMA — траектория FT Motion уже гладкая на 5 кГц)
+        const int64_t pa_offset_new_q16 = ((int64_t)block_K_q16 * (int64_t)ve_curr_q16) >> 16;
 
         // (3) Жёсткий клиппинг по PA_MAX_P_MM (windup невозможен — нет интегратора)
         if (pa_max_offset_q16 > 0) {

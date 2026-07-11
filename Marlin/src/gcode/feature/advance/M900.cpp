@@ -132,15 +132,11 @@ if (parser.seenval('L')) {
     SERIAL_ECHOLNPGM("!L out of range (0.1-10.0)");
   }
 }
-// Task 1: Установка EMA-альфа через M900 E<alpha>
+// Task 1: Установка EMA-альфа через M900 E<alpha> — УСТАРЕЛО в v4.7+
+// EMA-фильтр удалён: траектория FT Motion на 5 кГц уже гладкая,
+// дополнительное сглаживание вносило фазовую задержку ~1.13 мс.
 if (parser.seenval('E')) {
-  const float e = parser.value_float();
-  if (WITHIN(e, 0.0f, 1.0f)) {
-    ftmotion_pa_set_ema_alpha(e);
-    SERIAL_ECHOLNPGM("SPA EMA alpha set to ", e);
-  } else {
-    SERIAL_ECHOLNPGM("!E out of range (0.0-1.0)");
-  }
+  SERIAL_ECHOLNPGM("!SPA v4.7+ does not use EMA filter. Ignoring E parameter.");
 }
 if (parser.seenval('S')) {
   SERIAL_ECHOLNPGM("SPA: Tau deprecated. Use K only (derivative model).");
