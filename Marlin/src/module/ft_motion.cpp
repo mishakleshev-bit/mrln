@@ -52,24 +52,28 @@
 FTMotion ftMotion;
 
 #if ENABLED(SIMPLIFIED_PA)
-  static int32_t spa_p_q16 = 0;                   // Текущее давление в сопле (формат Q16)
-  void ftmotion_pa_reset_state() { spa_p_q16 = 0; } // Сброс давления при разрыве филамента
-  
-  static constexpr float INV_Q16 = 1.52587890625e-5f; // 1.0f / 65536.0f — обратное Q16
-  static constexpr int32_t MAX_P_Q16 = int32_t(PA_MAX_P_MM * 65536.0f); // Лимит давления
-  
-  // Привязка к частоте FTM (не хардкод миллисекунд!)
-static constexpr float DT_S = 1.0f / float(FTM_FS);
-static float pa_tau_s = PA_TIME_CONST_MS * 0.001f; // Теперь переменная, а не константа
-static int32_t pa_beta_q16 = int32_t((DT_S / (pa_tau_s + DT_S)) * 65536.0f);
+// === НОВАЯ МОДЕЛЬ: ΔE = K·ΔVₑ (без EMA, без фазового сдвига) ===
+// Состояния сохраняются между блоками, сбрасываются только при G92 E0
+static int32_t ftmotion_pa_k_q16 = 0;           // Коэффициент K в формате Q16 (K_float × 65536)
+static int32_t spa_ve_prev_q16 = 0;             // Предыдущая скорость экструзии (Q16), мм/с × 65536
+static int32_t spa_pa_offset_q16 = 0;           // Накопленная компенсация PA (Q16), мм × 65536
+static constexpr int32_t Q16_FT_FS = int32_t(FTM_FS) << 16; // 65536 × FTM_FS для быстрых вычислений
 
-// Функция для смены Tau из G-кода
-void ftmotion_pa_set_tau_ms(float tau_ms) {
-  if (tau_ms < 0.1f) tau_ms = 0.1f; // Защита от деления на ноль
-  pa_tau_s = tau_ms * 0.001f;
-  pa_beta_q16 = int32_t((DT_S / (pa_tau_s + DT_S)) * 65536.0f);
+// Установка K из G-кода (внешний вызов из M900.cpp)
+void ftmotion_pa_set_k_q16(int32_t k_q16) {
+  ftmotion_pa_k_q16 = k_q16;
 }
-float ftmotion_pa_get_tau_ms() { return pa_tau_s * 1000.0f; }
+
+// Чтение текущего K (для отладки/отчёта)
+int32_t ftmotion_pa_get_k_q16() {
+  return ftmotion_pa_k_q16;
+}
+
+// Сброс состояния PA (вызывается при G92 E0, M600, разрыве филамента)
+void ftmotion_pa_reset_state() {
+  spa_ve_prev_q16 = 0;
+  spa_pa_offset_q16 = 0;
+}
 #endif
 
 void ft_config_t::prep_for_shaper_change() { ftMotion.prep_for_shaper_change(); }
@@ -627,25 +631,30 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
     #endif
   }
 #elif ENABLED(SIMPLIFIED_PA)
-  // Fallback без Look-Ahead (чтение K из глобала)
-  const float e_delta = traj_coords.e - prev_traj_e;
-  const float v_e_mm_s = e_delta * float(FTM_FS);
-  prev_traj_e = traj_coords.e;
+// === НОВАЯ МОДЕЛЬ: ΔE = K·ΔVₑ (без EMA, без фазового сдвига) ===
+// 1. Считаем текущую скорость экструзии в Q16
+const float e_delta = traj_coords.e - prev_traj_e;
+const float v_e_mm_s = e_delta * float(FTM_FS);  // мм/с
+const int32_t v_e_q16 = int32_t(v_e_mm_s * 65536.0f);
+
+// 2. ΔV = V_current - V_prev (в Q16)
+const int32_t delta_v_q16 = v_e_q16 - spa_ve_prev_q16;
+spa_ve_prev_q16 = v_e_q16;  // Сохраняем для следующего тика
+
+// 3. ΔE_pa = K_q16 × ΔV_q16 >> 16 (результат в Q16, мм × 65536)
+if (ftmotion_pa_k_q16 != 0 && delta_v_q16 != 0) {
+  const int64_t delta_e_pa_raw = (int64_t)ftmotion_pa_k_q16 * delta_v_q16;
+  const int32_t delta_e_pa_q16 = int32_t(delta_e_pa_raw >> 16);
   
-  int32_t v_q16 = int32_t(v_e_mm_s * 65536.0f);
-  int32_t K_q16 = int32_t(planner.get_advance_k() * 65536.0f);
+  // 4. Накопленная компенсация (интеграл ΔE)
+  spa_pa_offset_q16 += delta_e_pa_q16;
   
-  int64_t Kv = (int64_t)K_q16 * v_q16;
-  int32_t Kv_q16 = int32_t(Kv >> 16);
-  
-  int64_t p_decayed = (int64_t)spa_p_q16 * (65536 - BETA_Q16);
-  int64_t p_added   = (int64_t)Kv_q16 * BETA_Q16;
-  spa_p_q16 = int32_t((p_decayed + p_added) >> 16);
-  
-  NOMORE(spa_p_q16, MAX_P_Q16);
-  NOLESS(spa_p_q16, -MAX_P_Q16);
-  
-  traj_coords.e += float(spa_p_q16) * INV_Q16;
+  // 5. Применяем компенсацию к координате E
+  traj_coords.e += float(spa_pa_offset_q16) * (1.0f / 65536.0f);
+}
+
+// 6. Обновляем prev_traj_e для следующего тика
+prev_traj_e = traj_coords.e;
 #else
   // Стандартный LA Marlin (если SPA отключен)
   #if FTM_HAS_LIN_ADVANCE

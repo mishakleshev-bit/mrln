@@ -28,6 +28,11 @@
 #include "../../../module/planner.h"
 #include "../../../module/stepper.h"
 
+#if ENABLED(SIMPLIFIED_PA)
+// Подключаем заголовок FT Motion для доступа к функциям PA
+#include "../../../module/ft_motion.h"
+#endif
+
 #if ENABLED(ADVANCE_K_EXTRA)
   float other_extruder_advance_K[EXTRUDERS];
   uint8_t lin_adv_slot = 0;
@@ -114,14 +119,23 @@ void GcodeSuite::M900() {
         echo_value_oor('K');
     }
 
-    #if ENABLED(SIMPLIFIED_PA)
-  if (parser.seenval('S')) {
-    extern void ftmotion_pa_set_tau_ms(float tau_ms);  // Объявляем, что функция есть в другом файле
-    extern float ftmotion_pa_get_tau_ms();             // Объявляем функцию чтения
-    ftmotion_pa_set_tau_ms(parser.value_float());      // Применяем значение из G-кода
-    SERIAL_ECHOLNPGM("SPA Tau: ", ftmotion_pa_get_tau_ms(), " ms"); // Подтверждение в терминал
+#if ENABLED(SIMPLIFIED_PA)
+// Новая модель: параметр K (коэффициент усиления)
+// Использование: M900 K0.04  (где 0.04 — типичное значение для PLA Direct Drive)
+if (parser.seenval('K')) {
+  const float K_float = parser.value_float();  // Читаем K как float из G-кода
+  if (WITHIN(K_float, 0, 0.5f)) {              // Разумный диапазон для K
+    // Конвертируем float в Q16: K_q16 = K_float × 65536
+    const int32_t K_q16 = int32_t(K_float * 65536.0f);
+    ftmotion_pa_set_k_q16(K_q16);               // Устанавливаем K в формате Q16
+    // Подтверждение в терминал: показываем и Q16, и float для удобства
+    SERIAL_ECHOLNPGM("SPA K: ", K_float, " (Q16: ", K_q16, ")");
   }
-  #endif
+  else {
+    SERIAL_ECHOLNPGM("?K value out of range (0.0 - 0.5)");
+  }
+}
+#endif
   #endif  
 
   #if ENABLED(SMOOTH_LIN_ADVANCE)

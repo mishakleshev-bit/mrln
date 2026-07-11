@@ -4908,18 +4908,13 @@
 // Калькировка Klipper-style через непрерывный EMA-фильтр в ISR
 #if ENABLED(FT_MOTION)
   #define SIMPLIFIED_PA                   // [ВКЛ] Включаем упрощённый PA
-  #define PA_LOOKAHEAD                    // [ВКЛ] Look-Ahead для планировщика
+  //#define PA_LOOKAHEAD                    // [ВКЛ] Look-Ahead для планировщика
   //#define SPA_TELEMETRY
   
-  #if ENABLED(SIMPLIFIED_PA)
-    #define PA_MAX_P_MM        2.0f       // Максимальное давление (мм) — симметричный лимит
-                                          // Больше значения = больше запас для резких углов
-    
-    #define PA_TIME_CONST_MS  30.0f       // Tau (постоянная времени в мс)
-                                          // Определяет как быстро давление нарастает/спадает
-                                          // 20мс — хороший старт для PLA Direct Drive
-    
-    #define PA_MIN_BLOCK_MM    0.5f       // Фильтр микро-сегментов (для отладки)
-                                          // Уменьшить до 0.0f после тестов
-  #endif
+#if ENABLED(SIMPLIFIED_PA)
+// Старые параметры EMA-модели больше не используются:
+//#define PA_TIME_CONST_MS  30.0f       // Удалено: новая модель использует только K
+//#define PA_MIN_BLOCK_MM   0.5f        // Удалено: фильтрация микро-сегментов не требуется
+#define PA_MAX_P_MM        2.0f        // Лимит давления (можно использовать для отладки)
+#endif
 #endif
