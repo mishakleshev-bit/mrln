@@ -25,7 +25,7 @@
  * Release version. Leave the Marlin version or apply a custom scheme.
  */
 #ifndef SHORT_BUILD_VERSION
-  #define SHORT_BUILD_VERSION "SPA-v4.7"
+  #define SHORT_BUILD_VERSION "SPA-v4.9"
 #endif
 
 /**

@@ -141,6 +141,22 @@ if (parser.seenval('E')) {
 if (parser.seenval('S')) {
   SERIAL_ECHOLNPGM("SPA: Tau deprecated. Use K only (derivative model).");
 }
+// Task 5: Dynamic Volumetric SRL через M900 R<max_volflow_mm3_s>
+// Устанавливает максимальный объёмный расход хотенда (мм³/с).
+// Используется для динамического расчёта SRL: d(offset)/dt ≤ V_f_max - |Ve|
+// R0 = unlimited (не рекомендуется). По умолчанию: SPA_PA_MAX_VOLFLOW.
+if (parser.seenval('R')) {
+  const float r = parser.value_float();
+  if (r < 0) {
+    SERIAL_ECHOLNPGM("!R out of range (>= 0)");
+  } else if (r == 0) {
+    ftmotion_pa_set_max_volflow(9999.0f); // unlimited
+    SERIAL_ECHOLNPGM("SPA PA volumetric SRL: unlimited");
+  } else {
+    ftmotion_pa_set_max_volflow(r);
+    SERIAL_ECHOLNPGM("SPA PA volumetric SRL set to ", r, " mm^3/s");
+  }
+}
 #endif
   #endif  
 

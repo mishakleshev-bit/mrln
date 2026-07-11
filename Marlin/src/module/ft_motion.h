@@ -435,6 +435,7 @@ extern int32_t ftmotion_pa_k_q16;
 void ftmotion_pa_reset_state();
 void ftmotion_pa_set_k(float k_new);
 void ftmotion_pa_set_max_offset(float max_offset_mm);  // Task 4: M900 L<value>
+void ftmotion_pa_set_max_volflow(float volflow_mm3_s); // Task 5: M900 R<value> (мм³/с)
 inline float ftmotion_pa_get_k() { return ftmotion_pa_k_q16 / 65536.0f; }
 #endif
 

@@ -1,4 +1,4 @@
-# Документация алгоритма SPA (Simplified Pressure Advance) v4.6
+# Документация алгоритма SPA (Simplified Pressure Advance) v4.9
 
 ## Содержание
 
@@ -25,7 +25,7 @@
 
 Расход пластика:           ╱──╲    ╱──╲
 (с выбросом)              ╱    ╲──╱    ╲
-                             недолив  перелив
+                            недолив  перелив
 ```
 
 ### 1.2 Идея Pressure Advance
@@ -39,20 +39,20 @@ E_коррекция = K × V_печати × ускорение
 
 Это требует знания ускорения, производной скорости и даёт сильную связь между параметрами движения.
 
-### 1.3 Пропорциональная модель SPA (v4.6+)
+### 1.3 Пропорциональная модель SPA (v4.9+)
 
-**SPA (Simplified Pressure Advance)** реализует **пропорциональную модель** (эквивалент Klipper PA): компенсация вычисляется как прямая пропорция от сглаженной скорости экструзии:
+**SPA (Simplified Pressure Advance)** реализует **пропорциональную модель** (эквивалент Klipper PA): компенсация вычисляется как прямая пропорция от сырой скорости экструзии:
 
 ```
-E_компенсация = K × Ve_smooth
+E_компенсация = K × Ve_raw
 ```
 
 **Ключевые отличия от классического LinAdvance:**
-- Использует EMA-фильтр низких частот для Ve (`SPA_EMA_ALPHA`) — Task 1
 - Не требует знания ускорения блока
 - Работает в фиксированном временном кадре `FTM_TS = 1 / FTM_FS`
-- Прямая пропорция `offset = K × Ve_smooth` (без интегратора) — **нулевая фазовая задержка**
+- Прямая пропорция `offset = K × Ve_raw` (без интегратора) — **нулевая фазовая задержка**
 - Математически эквивалентен Klipper Pressure Advance
+- **Dynamic Volumetric SRL** предотвращает пропуск шагов, базируясь на максимальном объёмном расходе хотенда
 - Плавный сброс offset при ретрактах (`SPA_RETRACT_DECAY`)
 - Per-block K (сохраняется при планировании) — устранён race condition при смене K во время движения
 
@@ -66,73 +66,85 @@ E_компенсация = K × Ve_smooth
 |--------|----------|---------|
 | `K` | Коэффициент Pressure Advance | с (секунды) |
 | `Ve[t]` | Сырая скорость экструзии в момент t | мм/с |
-| `Ve_smooth[t]` | Сглаженная скорость (после EMA) | мм/с |
-| `α` | Коэффициент EMA-фильтра (SPA_EMA_ALPHA) | — |
 | `E_planned[t]` | Плановое положение экструдера | мм |
 | `E_corrected[t]` | Скорректированное положение экструдера | мм |
-| `offset[t]` | Компенсация PA (offset = K × Ve_smooth) | мм |
+| `offset[t]` | Компенсация PA (offset = K × Ve) | мм |
 | `offset_max` | Максимальный лимит offset (PA_MAX_P_MM) | мм |
+| `Q_max` | Максимальный объёмный расход хотенда (MVS) | мм³/с |
+| `V_f_max` | Макс. скорость филамента = Q_max / A_filament | мм/с |
+| `A_fil` | Площадь сечения филамента = π × (d/2)² | мм² |
 | `FTM_FS` | Частота дискретизации FT Motion | Гц |
 | `FTM_TS` | Период кадра = 1 / FTM_FS | с |
 | `Q16` | Формат фиксированной точки: 16 дробных битов | — |
 
-### 2.2 Уравнения (v4.6)
+### 2.2 Уравнения (v4.9)
 
 **Шаг 1. Вычисление текущей скорости экструзии:**
 ```
 Ve[t] = (E_planned[t] - E_planned[t-1]) × FTM_FS      (1)
 ```
 
-**Шаг 1a. EMA-фильтр низких частот (Task 1):**
+**Шаг 2. Целевой offset (прямая пропорция, только при экструзии):**
 ```
-Ve_smooth[t] = Ve_smooth[t-1] + α × (Ve[t] - Ve_smooth[t-1])
-```
-где `α = SPA_EMA_ALPHA`. Постоянная времени фильтра:
-```
-τ ≈ (1 - α) / (α × FTM_FS)
-```
-При `α = 0.15` и `FTM_FS = 5000 Гц`: `τ ≈ 1.13 мс`.
-
-**Шаг 2. Прямая пропорция offset = K × Ve_smooth (только при экструзии):**
-```
-offset[t] = K × Ve_smooth[t]                              (2)
+target[t] = K × Ve[t]                                    (2)
 ```
 
-**Шаг 2a. Жёсткий clamp по PA_MAX_P_MM:**
+**Шаг 3. Dynamic Volumetric SRL (v4.9):**
+```
+Δoffset[t] = target[t] - offset[t-1]
+
+avail = V_f_max - |Ve[t]|          # доступный запас скорости филамента
+δ_max_кадр = max(0, avail × FTM_TS)  # доступное Δoffset за 1 кадр
+
+if (Δoffset[t] > δ_max_кадр)
+    Δoffset[t] = δ_max_кадр
+if (Δoffset[t] < -δ_max_кадр)
+    Δoffset[t] = -δ_max_кадр
+
+offset[t] = offset[t-1] + Δoffset[t]                     (3)
+```
+
+где `V_f_max = Q_max / (π × (d_fil/2)²)` — максимальная скорость филамента.
+
+**Ключевое отличие от обычного SRL (v4.8):** Лимит не константа `SPA_PA_MAX_RATE` (подбираемая эмпирически), а динамическая величина, зависящая от текущего Ve и физического MVS хотенда.
+
+**Шаг 4. Жёсткий clamp по PA_MAX_P_MM:**
 ```
 if (|offset[t]| > offset_max)
     offset[t] = clamp(offset[t], -offset_max, +offset_max)
 ```
 
-**Шаг 2b. Затухание при ретракте (Retract Decay):**
+**Шаг 5. Затухание при ретракте (Retract Decay):**
 ```
 Если не pa_extruding:
     offset[t] = offset[t-1] - offset[t-1] >> SPA_RETRACT_DECAY
 ```
 
-**Шаг 3. Скорректированное положение экструдера:**
+**Шаг 6. Скорректированное положение экструдера:**
 ```
-E_corrected[t] = E_planned[t] + offset[t]                (3)
+E_corrected[t] = E_planned[t] + offset[t]                (4)
 ```
 
-**Ключевое отличие от v4.5:** Вместо дифференциальной модели (ΔVe → интегратор → offset) используется прямая пропорция `offset = K × Ve_smooth`. Это устраняет фазовую задержку ~1.13 мс, которая была причиной недоэкструзии на разгонах и переэкструзии в углах. Мягкое клиппирование (`SPA_SOFT_CLAMP`) больше не требуется — интегратор устранён, windup невозможен.
+### 2.3 Почему Dynamic Volumetric SRL, а не константа?
 
-### 2.3 Зачем нужно EMA-сглаживание?
+| Характеристика | Константный SRL (v4.8) | Dynamic Volumetric SRL (v4.9) |
+|---------------|----------------------|------------------------------|
+| **Принцип** | Эмпирическая константа `SPA_PA_MAX_RATE` | Физический лимит `Q_max / A_fil` |
+| **На разгоне (Ve≈0)** | `δ_max = 0.06 мм/кадр` (300 мм/с × 200 мкс) | **`δ_max = 0.0015 мм/кадр`** (7.48 мм/с × 200 мкс) — зато точно! |
+| **На высокой Ve** | `δ_max = 0.06 мм/кадр` | **`δ_max ≈ 0`** (всё Q уже занято базовой подачей) |
+| **Гарантия step loss** | Нет (R=300 даёт 28000 steps/s — мотор не успевает) | **Да** (гарантирует, что Ve + d(offset)/dt ≤ Q_max) |
+| **Размерность** | мм/с (эмпирическая) | мм³/с (физическая, MVS хотенда) |
 
-**Проблема:** В Klipper и современных слайсерах траектория разбита на микро-сегменты. Если применять `K × Ve` к "сырой" скорости каждого микро-сегмента, скорость экструзии будет иметь пилообразный характер.
+**Вывод:** v4.9 решает фундаментальную проблему — гарантирует, что **суммарная скорость филамента (Ve + PA offset rate) никогда не превышает физической способности хотенда проплавлять пластик**, независимо от K и ускорения.
 
-**Последствия без фильтра:**
-1. Экструдерный мотор получает рывки (jerk) на каждом шаге планировщика
-2. Возникает **резонанс механики экструдера**
-3. **Потеря шагов (step loss)** на высоких скоростях
-4. **"Мыльные" углы** из-за микро-флуктуаций давления
-
-**Решение:** EMA-фильтр низких частот сглаживает Ve перед вычислением ΔVe. Это эквивалентно подходу Klipper, где profile velocity smoothing применяется до PA.
+**Асимметричность:** SRL в v4.9 работает асимметрично
+- **Разгон (Ve растёт):** `avail = V_f_max - |Ve|` уменьшается → лимит растёт медленно
+- **Торможение (Ve падает):** `avail` увеличивается → offset может падать быстрее (выдавливание излишка)
 
 ### 2.4 Анализ размерности
 
 ```
-offset [мм] = K [с] × Ve_smooth [мм/с] = [мм] ✓
+offset [мм] = K [с] × Ve [мм/с] = [мм] ✓
 ```
 
 `K = 0.1` означает, что при скорости экструзии 10 мм/с компенсация составит 1 мм.
@@ -150,19 +162,23 @@ offset [мм] = K [с] × Ve_smooth [мм/с] = [мм] ✓
 | Переменная | Тип | Описание | Q16 |
 |-----------|-----|----------|-----|
 | `ftmotion_pa_k_q16` | int32_t | K × 65536 | Q16 |
-| `spa_ve_smooth_q16` | int32_t | Ve_smooth[t] × 65536 | Q16 |
-| `spa_ema_alpha_q16` | int32_t | α × 65536 | Q16 |
 | `spa_pa_offset_q16` | int64_t | offset[t] × 65536 | Q16 (хранится в int64_t) |
 | `pa_max_offset_q16` | int64_t | offset_max × 65536 | Q16 (0 = без лимита) |
+| `spa_v_filament_max_q16` | int64_t | V_f_max × 65536 = Q_max / A_fil × 65536 | Q16 |
 
-### 2.6 Поведение прямой пропорции (v4.6)
+> **v4.9:** Переменные `spa_max_delta_per_frame_q16` и `ftmotion_pa_set_max_rate()` удалены — заменены на Dynamic Volumetric SRL.
 
-SPA v4.6 использует **прямую пропорцию** `offset = K × Ve_smooth`, что даёт:
-- **Нулевая фазовая задержка**: offset вычисляется мгновенно из текущей сглаженной скорости, без ожидания накопления интегратора
-- **Автоматический возврат к нулю**: при остановке движения (Ve_smooth = 0) offset = 0
-- **Корректная компенсация на разгонах**: offset мгновенно следует за Ve_smooth — нет недоэкструзии в начале движения
-- **Чёткие углы**: offset начинает спадать одновременно со снижением Ve_smooth — нет задержки сброса давления
+### 2.6 Поведение Dynamic Volumetric SRL (v4.9)
+
+SPA v4.9 использует **прямую пропорцию** `offset = K × Ve_raw` с **Dynamic Volumetric Slew Rate Limiter**, что даёт:
+
+- **Физически обоснованный лимит**: SRL базируется на MVS хотенда, а не на эмпирически подобранной константе
+- **Автоматическая адаптация**: при низкой Ve (старт разгона) offset растёт быстро; при высокой Ve — медленно; при Ve ≥ V_f_max — только уменьшается
+- **Нулевая фазовая задержка пока avail большой**: на малых Ve Δoffset не клиппируется
+- **Чёткие углы**: offset начинает спадать одновременно со снижением Ve — нет задержки сброса давления
 - **Устойчивость**: отсутствие интегратора исключает windup; жёсткий clamp по PA_MAX_P_MM работает без побочных эффектов
+- **Безопасность**: SRL гарантирует, что общий расход никогда не превысит физических возможностей хотенда
+- **Асимметричность**: разгон (рост offset) лимитируется жёстче, торможение (спад offset) — мягче
 
 ---
 
@@ -195,11 +211,13 @@ SPA требует наличия **обоих** макросов в [`Configura
 - `SIMPLIFIED_PA` — управляет глобальными переменными, функциями установки/сброса
 - `PA_LOOKAHEAD` — управляет алгоритмом в `calc_traj_point()` и полями `block_t`
 
-Дополнительные макросы (v4.6):
-- `SPA_EMA_ALPHA` — коэффициент EMA-фильтра (Task 1)
-- ~~`SPA_SOFT_CLAMP`~~ — **устарел в v4.6+** (интегратор устранён, windup невозможен; используется жёсткий clamp)
+Дополнительные макросы (v4.9):
+- ~~`SPA_EMA_ALPHA`~~ — **удалён в v4.7+** (EMA заменён Dynamic Volumetric SRL)
+- ~~`SPA_SOFT_CLAMP`~~ — **устарел в v4.6+** (интегратор устранён, windup невозможен)
+- ~~`SPA_PA_MAX_RATE`~~ — **удалён в v4.9+** (заменён на `SPA_PA_MAX_VOLFLOW`)
 - `SPA_TELEMETRY` — вывод телеметрии
 - `SPA_PEAK_TRACKING` — пиковый offset в телеметрии (Task 3)
+- `SPA_PA_MAX_VOLFLOW` — Dynamic Volumetric SRL (Task 5, мм³/с, по умолч. 15)
 - `SPA_RETRACT_DECAY` — затухание при ретрактах
 
 ### 3.3 Глобальные переменные
@@ -208,12 +226,16 @@ SPA требует наличия **обоих** макросов в [`Configura
 
 ```cpp
 #if ENABLED(SIMPLIFIED_PA)
-// === SPA v4.6: Прямая пропорция offset = K × Ve_smooth (эквивалентно Klipper PA) ===
+// === SPA v4.9: Прямая пропорция offset = K × Ve + Dynamic Volumetric SRL ===
 int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
-static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — EMA-фильтр
-static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve_smooth
-static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f);  // Лимит offset (из конфига)
-int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);       // Коэффициент EMA (Q16) из конфига
+static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve
+static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
+
+// Максимальная скорость филамента (V_f_max = Q_max / A_filament) в Q16.
+// Определяет предел: |Ve + d(offset)/dt| ≤ V_f_max.
+static int64_t spa_v_filament_max_q16 = int64_t(
+  (SPA_PA_MAX_VOLFLOW) / ((PI * 0.875f * 0.875f)) * 65536.0f
+);
 
 #if ENABLED(SPA_PEAK_TRACKING)
   static int64_t spa_peak_offset_q16 = 0;       // Пиковый |offset| за период телеметрии
@@ -221,11 +243,9 @@ int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);       // Коэф
 #endif
 ```
 
-> **Важно:** `spa_ema_alpha_q16` и `pa_max_offset_q16` инициализируются из конфига при старте и НЕ сбрасываются при смене K через M900.
-
 ### 3.4 Основные функции
 
-#### Установка коэффициента `K` — [`ftmotion_pa_set_k()`](Marlin/src/module/ft_motion.cpp:68)
+#### Установка коэффициента `K` — [`ftmotion_pa_set_k()`](Marlin/src/module/ft_motion.cpp:65)
 
 ```cpp
 void ftmotion_pa_set_k(float k_new) {
@@ -235,7 +255,7 @@ void ftmotion_pa_set_k(float k_new) {
 
 Вызывается из `planner.set_advance_k()` (синхронизация SPA с extruder_advance_K[]).
 
-#### Установка лимита offset — [`ftmotion_pa_set_max_offset()`](Marlin/src/module/ft_motion.cpp:80) (Task 4)
+#### Установка лимита offset — [`ftmotion_pa_set_max_offset()`](Marlin/src/module/ft_motion.cpp:71) (Task 4)
 
 ```cpp
 void ftmotion_pa_set_max_offset(float max_offset_mm) {
@@ -245,22 +265,21 @@ void ftmotion_pa_set_max_offset(float max_offset_mm) {
 
 Управляется через `M900 L<value>`. Диапазон: 0.1–10.0 мм.
 
-#### Установка EMA-альфа — [`ftmotion_pa_set_ema_alpha()`](Marlin/src/module/ft_motion.cpp:85) (Task 1)
+#### Установка Dynamic Volumetric SRL — [`ftmotion_pa_set_max_volflow()`](Marlin/src/module/ft_motion.cpp:76) (Task 5)
 
 ```cpp
-void ftmotion_pa_set_ema_alpha(float alpha) {
-  LIMIT(alpha, 0.0f, 1.0f);
-  spa_ema_alpha_q16 = int32_t(alpha * 65536.0f);
+void ftmotion_pa_set_max_volflow(float volflow_mm3_s) {
+  spa_v_filament_max_q16 = int64_t(volflow_mm3_s / (PI * 0.875f * 0.875f) * 65536.0f);
 }
 ```
 
-Управляется через `M900 E<alpha>`. Диапазон: 0.0–1.0.
+Управляется через `M900 R<value>`. Значение = MVS хотенда [мм³/с].
+`R0` = unlimited (только для диагностики).
 
-#### Сброс состояния — [`ftmotion_pa_reset_state()`](Marlin/src/module/ft_motion.cpp:91)
+#### Сброс состояния — [`ftmotion_pa_reset_state()`](Marlin/src/module/ft_motion.cpp:81)
 
 ```cpp
 void ftmotion_pa_reset_state() {
-  spa_ve_smooth_q16 = 0;
   spa_pa_offset_q16 = 0;
   #if ENABLED(SPA_PEAK_TRACKING)
     spa_peak_offset_q16 = 0;
@@ -268,9 +287,9 @@ void ftmotion_pa_reset_state() {
 }
 ```
 
-#### Основной алгоритм — [`calc_traj_point()`](Marlin/src/module/ft_motion.cpp:547)
+#### Основной алгоритм — [`calc_traj_point()`](Marlin/src/module/ft_motion.cpp:532)
 
-Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`), **v4.6 — прямая пропорция**:
+Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`), **v4.9 — прямая пропорция + Dynamic Volumetric SRL**:
 
 ```cpp
 block_t* current_block = stepper.get_current_block();
@@ -280,48 +299,64 @@ if (current_block && current_block->pa_active) {
   const float e_planned = traj_coords.e;
 
   // (1) Ve_raw в Q16
-  const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
-
-  // (T1) EMA-фильтр: ve_smooth += alpha * (ve_raw - ve_smooth)
-  const int32_t ve_diff_q16 = ve_curr_raw_q16 - spa_ve_smooth_q16;
-  spa_ve_smooth_q16 += int32_t((int64_t(spa_ema_alpha_q16) * int64_t(ve_diff_q16)) >> 16);
+  const int32_t ve_curr_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
 
   if (current_block->pa_extruding) {
-    // (2) Прямая пропорция: offset = K × Ve_smooth
-    const int64_t pa_offset_new_q16 = ((int64_t)block_K_q16 * (int64_t)spa_ve_smooth_q16) >> 16;
+    // (2) Целевой offset (прямая пропорция)
+    const int64_t target_offset_q16 = ((int64_t)block_K_q16 * (int64_t)ve_curr_q16) >> 16;
 
-    // (3) Жёсткий clamp по PA_MAX_P_MM (мягкое клиппирование не требуется — нет интегратора)
+    // (3) Δoffset = target - current
+    int64_t delta_offset_q16 = target_offset_q16 - spa_pa_offset_q16;
+
+    // (T5) Dynamic Volumetric SRL (v4.9) — ограничение по MVS хотенда
+    if (spa_v_filament_max_q16 > 0) {
+      // Текущая скорость филамента: |Ve| в Q16
+      const int64_t ve_abs_q16 = (ve_curr_q16 >= 0) ? ve_curr_q16 : -ve_curr_q16;
+      // Доступный запас: V_f_max - |Ve|
+      const int64_t avail_q16 = spa_v_filament_max_q16 - ve_abs_q16;
+      // Доступный Δoffset/кадр = avail × FTM_TS
+      // avail_q16 уже в Q16, деление на FTM_FS сохраняет Q16
+      const int64_t max_delta_frame_q16 = (avail_q16 > 0)
+        ? avail_q16 / int64_t(FTM_FS)
+        : 0;
+
+      if (delta_offset_q16 > max_delta_frame_q16)
+        delta_offset_q16 = max_delta_frame_q16;
+      else if (delta_offset_q16 < -max_delta_frame_q16)
+        delta_offset_q16 = -max_delta_frame_q16;
+    }
+
+    // (4) Применение ограниченного смещения
+    spa_pa_offset_q16 += delta_offset_q16;
+
+    // (5) Жёсткий clamp по PA_MAX_P_MM
     if (pa_max_offset_q16 > 0) {
-      if (pa_offset_new_q16 > pa_max_offset_q16)
+      if (spa_pa_offset_q16 > pa_max_offset_q16)
         spa_pa_offset_q16 = pa_max_offset_q16;
-      else if (pa_offset_new_q16 < -pa_max_offset_q16)
+      else if (spa_pa_offset_q16 < -pa_max_offset_q16)
         spa_pa_offset_q16 = -pa_max_offset_q16;
-      else
-        spa_pa_offset_q16 = pa_offset_new_q16;
-    } else {
-      spa_pa_offset_q16 = pa_offset_new_q16;
     }
   }
   else {
-    // (4) Retract Decay: затухание при ретракте (по-прежнему накопленный offset)
+    // (6) Retract Decay: затухание при ретракте
     #if SPA_RETRACT_DECAY > 0
       spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
     #endif
   }
 
-  // (5) Применение offset
+  // (7) Применение offset
   prev_traj_e = e_planned;
   traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
 }
 ```
 
-**Ключевые отличия от v4.5:**
-1. **Удалён** расчёт `dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16` — больше не нужен
-2. **Удалена** переменная `spa_ve_prev_q16` — хранение предыдущего Ve_smooth не требуется
-3. **Удалён** интегратор `spa_pa_offset_q16 += pa_delta_q16` — offset НЕ накапливается, а перезаписывается
-4. **Удалено** мягкое клиппирование (`SPA_SOFT_CLAMP`) — с прямым расчётом offset windup невозможен
-5. **offset вычисляется мгновенно** как `K × Ve_smooth` — нулевая фазовая задержка
-6. `pa_offset_new_q16` — **локальная** переменная; при экструзии offset полностью пересчитывается каждый кадр
+**Ключевые отличия от v4.8:**
+1. **Удалён** константный `spa_max_delta_per_frame_q16` (SPA_PA_MAX_RATE)
+2. **Добавлен** Dynamic Volumetric SRL: `δ_max_кадр = max(0, V_f_max - |Ve|) × FTM_TS`
+3. **Добавлена** переменная `spa_v_filament_max_q16` — V_f_max на основе `SPA_PA_MAX_VOLFLOW`
+4. **Добавлена** функция `ftmotion_pa_set_max_volflow()` — установка через M900 R (мм³/с)
+5. **Добавлена** асимметричность: разгон (Ve растёт) → жёстче, торможение (Ve падает) → мягче
+6. Физически гарантирует: `Ve + d(offset)/dt ≤ Q_max / A_filament`
 
 ### 3.5 Вспомогательные структуры данных
 
@@ -347,7 +382,7 @@ block->pa_extruding = (block->steps.e > 0);
 При включении `SPA_TELEMETRY` и `SPA_PEAK_TRACKING` в терминал выводится:
 
 ```
-PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
+PA|K=0.100 Ve=45.2 Off=1.27 OffPeak=1.50
 ```
 
 - `OffPeak` — пиковое значение |offset| за последние 50 мс
@@ -361,15 +396,15 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, `SPA_EMA_ALPHA`, ~~`SPA_SOFT_CLAMP`~~ (устарел в v4.6+), `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_RETRACT_DECAY` |
+| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, ~~`SPA_EMA_ALPHA`~~ (удалён в v4.7), ~~`SPA_SOFT_CLAMP`~~ (устарел в v4.6), ~~`SPA_PA_MAX_RATE`~~ (удалён в v4.9), `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_PA_MAX_VOLFLOW`, `SPA_RETRACT_DECAY` |
 
 ### 4.2 Ядро SPA
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`ft_motion.h`](Marlin/src/module/ft_motion.h:433) | Объявления: `ftmotion_pa_k_q16`, `spa_ema_alpha_q16`, функции установки/чтения |
+| [`ft_motion.h`](Marlin/src/module/ft_motion.h:433) | Объявления: `ftmotion_pa_k_q16`, функции установки/чтения |
 | [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:54) | Глобальные переменные и функции установки/сброса |
-| [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:547) | Основной алгоритм в `calc_traj_point()` |
+| [`ft_motion.cpp`](Marlin/src/module/ft_motion.cpp:532) | Основной алгоритм в `calc_traj_point()` |
 
 ### 4.3 Планировщик (block_t)
 
@@ -383,7 +418,7 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`M900.cpp`](Marlin/src/gcode/feature/advance/M900.cpp) | `M900 K<value> L<value> E<alpha>` — установка параметров |
+| [`M900.cpp`](Marlin/src/gcode/feature/advance/M900.cpp) | `M900 K<value> L<value> R<value>` — установка параметров |
 | [`G92.cpp`](Marlin/src/gcode/geometry/G92.cpp) | `G92 E0` — сброс состояния SPA + флагов очереди |
 | [`pause.cpp`](Marlin/src/feature/pause.cpp) | Пауза / M600 — сброс состояния SPA |
 | [`stepper.h`](Marlin/src/module/stepper.h) | `get_current_block()` — доступ к текущему блоку |
@@ -408,14 +443,25 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 > - ✅ `M900 K0.10` — правильно
 > - ❌ `M900 К0.10` — неправильно (кириллическая `К` не распознаётся)
 
-### 5.3 Настройка EMA-фильтра (Task 1)
+### 5.3 Настройка Dynamic Volumetric SRL (Task 5)
 
-`M900 E<alpha>` — меняет коэффициент EMA на лету:
-- `M900 E0.0` — без фильтрации (поведение v4.4)
-- `M900 E0.15` — умеренная фильтрация (рекомендуется для PLA)
-- `M900 E0.30` — сильная фильтрация (для PETG/TPU с высокими ускорениями)
+**Важнейшее изменение в v4.9:** SRL больше не настраивается произвольной константой. Вместо этого нужно указать **максимальный объёмный расход (MVS)** хотенда для вашего филамента.
 
-**Правило:** Если `OffPeak` в телеметрии регулярно достигает `PA_MAX_P_MM`, увеличьте `alpha` (больше сглаживания) или уменьшите ускорения.
+`M900 R<max_volflow_mm3_s>` — установка MVS хотенда:
+
+- **Как подобрать значение:**
+  1. Измерьте MVS для вашего филамента (калибровка в OrcaSlicer или вручную)
+  2. Типичные значения: PETG/PLA 0.4mm nozzle → **10–20 мм³/с**
+  3. Установите `M900 R<ваше_MVS>`
+
+- **Примеры:**
+  - `M900 R18` — MVS = 18 мм³/с (ваш текущий филамент)
+  - `M900 R12` — MVS = 12 мм³/с (консервативно для PETG)
+  - `M900 R0` — unlimited (ТОЛЬКО для диагностики, не рекомендуется)
+
+- **Проверка на практике:**
+  - Если слышен треск/пропуск шагов — SRL работает корректно, нужно уменьшить K или проверить MVS
+  - Если offset явно «не успевает» — ваше MVS может быть занижено
 
 ### 5.4 Настройка PA_MAX_P_MM (Task 4)
 
@@ -428,7 +474,7 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 При включённом `SPA_PEAK_TRACKING`:
 ```
-PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
+PA|K=0.100 Ve=45.2 Off=1.27 OffPeak=1.50
 ```
 
 - `Off` — текущий offset
@@ -437,7 +483,7 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 ### 5.6 Смена филамента
 
-При `M600` или обрыве филамента вызывается `ftmotion_pa_reset_state()` — сброс накопленного offset, предыдущей скорости и EMA-фильтра.
+При `M600` или обрыве филамента вызывается `ftmotion_pa_reset_state()` — сброс накопленного offset и флагов.
 
 ### 5.7 Совместимость с другими системами
 
@@ -446,50 +492,72 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 | FT Motion | Обязателен | SPA работает только в связке с FT Motion |
 | Input Shaping | Полная | SPA применяется до shaping/smoothing |
 | Smoothing | Полная | Не влияет на работу сглаживания |
-| M900 | Да | K, L, E параметры |
+| M900 | Да | K, L, R параметры (E — игнорируется в v4.7+) |
 | G92 E0 | Да | Сброс состояния + сброс очереди PA |
 
 ---
 
 ## 6. История изменений
 
-### v4.6 — текущая версия (рекомендуется)
+### v4.9 — текущая версия (рекомендуется)
 
 | Дата | Изменение | Задача |
 |------|-----------|--------|
-| 2026-07-11 | **Кардинальное изменение алгоритма:** дифференциальная модель `offset[t] = offset[t-1] + K·ΔVe` заменена на **прямую пропорцию** `offset[t] = K·Ve_smooth` | v4.6 |
-| 2026-07-11 | Удалена переменная `spa_ve_prev_q16` — хранение предыдущей Ve_smooth больше не требуется | v4.6 |
-| 2026-07-11 | Удалён интегратор `spa_pa_offset_q16 += pa_delta_q16` — offset перезаписывается, а не накапливается | v4.6 |
-| 2026-07-11 | Удалён расчёт `dve_q16` (ΔVe) — больше не нужен | v4.6 |
-| 2026-07-11 | `SPA_SOFT_CLAMP` помечен как устаревший — с прямым расчётом offset windup интегратора невозможен | v4.6 |
-| 2026-07-11 | Жёсткий clamp по `PA_MAX_P_MM` применяется к `K·Ve_smooth`, а не к накопленному offset | v4.6 |
-| 2026-07-11 | SPA v4.6 математически **эквивалентен Klipper Pressure Advance** | v4.6 |
+| 2026-07-11 | **Кардинальная замена SRL:** константный `SPA_PA_MAX_RATE` → **Dynamic Volumetric SRL** на основе MVS хотенда (`SPA_PA_MAX_VOLFLOW`) | v4.9 |
+| 2026-07-11 | Удалён макрос `SPA_PA_MAX_RATE` и переменная `spa_max_delta_per_frame_q16` | Task 5 |
+| 2026-07-11 | Добавлен макрос `SPA_PA_MAX_VOLFLOW` и переменная `spa_v_filament_max_q16` (V_f_max = Q_max / A_fil) | Task 5 |
+| 2026-07-11 | Добавлена функция `ftmotion_pa_set_max_volflow()` вместо `ftmotion_pa_set_max_rate()` | Task 5 |
+| 2026-07-11 | Асимметричный SRL: разгон (рост offset) — жёстче, торможение (спад offset) — мягче | v4.9 |
+| 2026-07-11 | SRL теперь гарантирует: `Ve + d(offset)/dt ≤ Q_max / A_filament` — **физически обоснованная защита от step loss** | v4.9 |
+
+### v4.8 — архив
+
+| Дата | Изменение | Задача |
+|------|-----------|--------|
+| 2026-07-11 | **Добавлен Slew Rate Limiter** — ограничение Δoffset/кадр | v4.8 |
+| 2026-07-11 | Добавлен макрос `SPA_PA_MAX_RATE` (удалён в v4.9) | Task 5 |
+| 2026-07-11 | Добавлена функция `ftmotion_pa_set_max_rate()` (удалена в v4.9) | Task 5 |
+| 2026-07-11 | Алгоритм: `target→Δoffset→limit→accumulate` | v4.8 |
+
+### v4.7 — архив
+
+| Дата | Изменение | Задача |
+|------|-----------|--------|
+| 2026-07-11 | **Удалён EMA-фильтр** — `offset = K × Ve_raw` (нулевая фазовая задержка) | v4.7 |
+| 2026-07-11 | M900 E — помечен как устаревший | v4.7 |
+
+### v4.6 — архив
+
+| Дата | Изменение | Задача |
+|------|-----------|--------|
+| 2026-07-11 | **Дифференциальная модель → прямая пропорция** `offset[t] = K·Ve_smooth` (эквивалент Klipper PA) | v4.6 |
+| 2026-07-11 | Удалён интегратор, `spa_ve_prev_q16`, расчёт dVe | v4.6 |
+| 2026-07-11 | `SPA_SOFT_CLAMP` — устарел (windup интегратора невозможен) | v4.6 |
 
 ### v4.5-beta2 — архив
 
 | Дата | Изменение | Задача |
 |------|-----------|--------|
-| 2026-07-11 | Исправлен баг: `spa_ema_alpha_q16` не инициализировался из `SPA_EMA_ALPHA` (всегда 0) | Аудит |
-| 2026-07-11 | Исправлен баг: `pa_max_offset_q16` не инициализировался из `PA_MAX_P_MM` (всегда 0) | Аудит |
-| 2026-07-11 | Исправлена гонка: K теперь читается из `current_block->pa_K_q16`, а не из глобального `ftmotion_pa_k_q16` | Аудит |
-| 2026-07-11 | Удалён мёртвый код: `static block_t* last_block` в `calc_traj_point()` | Аудит |
-| 2026-07-11 | Удалён дублирующийся блок SPA в M900.cpp, который вызывал `ftmotion_pa_set_k()` напрямую, минуя `extruder_advance_K[]` | Аудит |
-| 2026-07-11 | Явная инициализация SPA K в `settings.cpp` при загрузке конфига | Аудит |
-| 2026-07-01 | Добавлен EMA-фильтр низких частот для Ve (`SPA_EMA_ALPHA`) | Task 1 |
-| 2026-07-01 | Добавлена функция `ftmotion_pa_set_ema_alpha()` (M900 E) | Task 1 |
+| 2026-07-11 | Исправлен баг: `spa_ema_alpha_q16` не инициализировался | Аудит |
+| 2026-07-11 | Исправлен баг: `pa_max_offset_q16` не инициализировался | Аудит |
+| 2026-07-11 | Исправлена гонка: Per-block K вместо глобального | Аудит |
+| 2026-07-11 | Удалён мёртвый код в `calc_traj_point()` | Аудит |
+| 2026-07-11 | Исправлен дублирующийся блок SPA в M900.cpp | Аудит |
+| 2026-07-11 | Явная инициализация K в settings.cpp | Аудит |
+| 2026-07-01 | Добавлен EMA-фильтр (`SPA_EMA_ALPHA`) | Task 1 |
 | 2026-07-01 | Добавлено мягкое клиппирование (`SPA_SOFT_CLAMP`) | Task 2 |
 | 2026-07-01 | Добавлен пиковый offset в телеметрию (`SPA_PEAK_TRACKING`) | Task 3 |
-| 2026-07-01 | Добавлен динамический PA_MAX_P_MM (`M900 L<value>`) | Task 4 |
+| 2026-07-01 | Добавлен `PA_MAX_P_MM` (`M900 L<value>`) | Task 4 |
 | 2026-07-01 | Добавлен Retract Decay (`SPA_RETRACT_DECAY`) | v4.5 |
 
 ### v4.4
 
 | Дата | Изменение | Автор |
 |------|-----------|-------|
-| 2026-07-01 | Раскомментирован `#define PA_LOOKAHEAD` — исправлен мёртвый код алгоритма | Аудит |
-| 2026-07-01 | `spa_pa_offset_q16`: int32_t → int64_t — защита от переполнения | Аудит |
-| 2026-07-01 | Добавлена `pa_max_offset_q16` — клиппинг offset по `PA_MAX_P_MM` | Аудит |
+| 2026-07-01 | Раскомментирован `PA_LOOKAHEAD` — исправлен мёртвый код | Аудит |
+| 2026-07-01 | `spa_pa_offset_q16`: int32_t → int64_t | Аудит |
+| 2026-07-01 | Добавлена `pa_max_offset_q16` | Аудит |
 
 ---
 
-*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.6 реализует пропорциональную модель offset = K·Ve_smooth (эквивалент Klipper PA) с EMA-сглаживанием скорости, жёстким clamp по PA_MAX_P_MM и Retract Decay, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения.*
+*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.9 реализует пропорциональную модель offset = K·Ve + Dynamic Volumetric SRL (MVS-базированная защита от step loss), с жёстким clamp по PA_MAX_P_MM и Retract Decay, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения. Dynamic Volumetric SRL асимметричен и гарантирует, что суммарный расход никогда не превысит физического MVS хотенда.*
