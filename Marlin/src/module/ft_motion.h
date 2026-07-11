@@ -431,11 +431,10 @@ class FTMotion {
 extern FTMotion ftMotion; // Use ftMotion.thing, not FTMotion::thing.
 
 #if ENABLED(SIMPLIFIED_PA)
+extern int32_t ftmotion_pa_k_q16;
 void ftmotion_pa_reset_state();
-// Новая модель: K в формате Q16 (целое × 65536)
-// K_q16 = K_float × 65536, например K=0.04 → K_q16=2621
-void ftmotion_pa_set_k_q16(int32_t k_q16);   // Установка K из G-кода
-int32_t ftmotion_pa_get_k_q16();             // Чтение текущего K (для отладки)
+void ftmotion_pa_set_k(float k_new);
+inline float ftmotion_pa_get_k() { return ftmotion_pa_k_q16 / 65536.0f; }
 #endif
 
 /**

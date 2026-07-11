@@ -4908,7 +4908,7 @@
 // Калькировка Klipper-style через непрерывный EMA-фильтр в ISR
 #if ENABLED(FT_MOTION)
   #define SIMPLIFIED_PA                   // [ВКЛ] Включаем упрощённый PA
-  //#define PA_LOOKAHEAD                    // [ВКЛ] Look-Ahead для планировщика
+  #define PA_LOOKAHEAD                    // [ВКЛ] Look-Ahead для планировщика
   //#define SPA_TELEMETRY
   
 #if ENABLED(SIMPLIFIED_PA)

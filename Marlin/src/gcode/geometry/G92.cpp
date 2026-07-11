@@ -131,11 +131,10 @@ void GcodeSuite::G92() {
 
 IF_DISABLED(DIRECT_STEPPING, motion.report_position());
 
-#if ENABLED(PA_LOOKAHEAD)
-if (parser.seenval('E')) planner.pa_flush_queue();  // Сброс флагов очереди при G92 E0
-#endif
-#if ENABLED(SIMPLIFIED_PA)
-// Сброс состояния PA при обнулении экструдера (G92 E0)
-if (parser.seenval('E')) ftmotion_pa_reset_state();
+#if ALL(PA_LOOKAHEAD, SIMPLIFIED_PA)
+if (parser.seenval('E')) {
+  ftmotion_pa_reset_state();
+  planner.pa_flush_queue();
+}
 #endif
 }

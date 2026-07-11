@@ -120,20 +120,17 @@ void GcodeSuite::M900() {
     }
 
 #if ENABLED(SIMPLIFIED_PA)
-// Новая модель: параметр K (коэффициент усиления)
-// Использование: M900 K0.04  (где 0.04 — типичное значение для PLA Direct Drive)
 if (parser.seenval('K')) {
-  const float K_float = parser.value_float();  // Читаем K как float из G-кода
-  if (WITHIN(K_float, 0, 0.5f)) {              // Разумный диапазон для K
-    // Конвертируем float в Q16: K_q16 = K_float × 65536
-    const int32_t K_q16 = int32_t(K_float * 65536.0f);
-    ftmotion_pa_set_k_q16(K_q16);               // Устанавливаем K в формате Q16
-    // Подтверждение в терминал: показываем и Q16, и float для удобства
-    SERIAL_ECHOLNPGM("SPA K: ", K_float, " (Q16: ", K_q16, ")");
+  const float k = parser.value_float();
+  if (WITHIN(k, 0.0f, 2.0f)) {
+    ftmotion_pa_set_k(k);
+    SERIAL_ECHOLNPGM("SPA K set to ", k, " s");
+  } else {
+    SERIAL_ECHOLNPGM("!K out of range (0.0-2.0)");
   }
-  else {
-    SERIAL_ECHOLNPGM("?K value out of range (0.0 - 0.5)");
-  }
+}
+if (parser.seenval('S')) {
+  SERIAL_ECHOLNPGM("SPA: Tau deprecated. Use K only (derivative model).");
 }
 #endif
   #endif  
