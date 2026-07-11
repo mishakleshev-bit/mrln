@@ -432,9 +432,13 @@ extern FTMotion ftMotion; // Use ftMotion.thing, not FTMotion::thing.
 
 #if ENABLED(SIMPLIFIED_PA)
 extern int32_t ftmotion_pa_k_q16;
+extern int32_t spa_ema_alpha_q16;
 void ftmotion_pa_reset_state();
 void ftmotion_pa_set_k(float k_new);
+void ftmotion_pa_set_max_offset(float max_offset_mm);  // Task 4: M900 L<value>
+void ftmotion_pa_set_ema_alpha(float alpha);            // Task 1: M900 E<alpha>
 inline float ftmotion_pa_get_k() { return ftmotion_pa_k_q16 / 65536.0f; }
+inline float ftmotion_pa_get_ema_alpha() { return spa_ema_alpha_q16 / 65536.0f; }
 #endif
 
 /**

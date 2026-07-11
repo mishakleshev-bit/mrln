@@ -129,6 +129,26 @@ if (parser.seenval('K')) {
     SERIAL_ECHOLNPGM("!K out of range (0.0-2.0)");
   }
 }
+// Task 4: Динамический PA_MAX_P_MM через M900 L<value>
+if (parser.seenval('L')) {
+  const float l = parser.value_float();
+  if (WITHIN(l, 0.1f, 10.0f)) {
+    ftmotion_pa_set_max_offset(l);
+    SERIAL_ECHOLNPGM("SPA PA_MAX_P_MM set to ", l, " mm");
+  } else {
+    SERIAL_ECHOLNPGM("!L out of range (0.1-10.0)");
+  }
+}
+// Task 1: Установка EMA-альфа через M900 E<alpha>
+if (parser.seenval('E')) {
+  const float e = parser.value_float();
+  if (WITHIN(e, 0.0f, 1.0f)) {
+    ftmotion_pa_set_ema_alpha(e);
+    SERIAL_ECHOLNPGM("SPA EMA alpha set to ", e);
+  } else {
+    SERIAL_ECHOLNPGM("!E out of range (0.0-1.0)");
+  }
+}
 if (parser.seenval('S')) {
   SERIAL_ECHOLNPGM("SPA: Tau deprecated. Use K only (derivative model).");
 }
