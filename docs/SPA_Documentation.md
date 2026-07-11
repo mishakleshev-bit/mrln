@@ -1,4 +1,4 @@
-# Документация алгоритма SPA (Simplified Pressure Advance) v4.5-beta2
+# Документация алгоритма SPA (Simplified Pressure Advance) v4.6
 
 ## Содержание
 
@@ -39,22 +39,20 @@ E_коррекция = K × V_печати × ускорение
 
 Это требует знания ускорения, производной скорости и даёт сильную связь между параметрами движения.
 
-### 1.3 Упрощённый PA: дифференциальная модель (SPA v4.5)
+### 1.3 Пропорциональная модель SPA (v4.6+)
 
-**SPA (Simplified Pressure Advance)** реализует **дифференциальную модель**, основанную на изменении скорости экструзии между последовательными временными отсчётами (кадрами FT Motion):
+**SPA (Simplified Pressure Advance)** реализует **пропорциональную модель** (эквивалент Klipper PA): компенсация вычисляется как прямая пропорция от сглаженной скорости экструзии:
 
 ```
-ΔVe = Ve[текущий] - Ve[предыдущий]
-E_компенсация += K × ΔVe
+E_компенсация = K × Ve_smooth
 ```
 
 **Ключевые отличия от классического LinAdvance:**
 - Использует EMA-фильтр низких частот для Ve (`SPA_EMA_ALPHA`) — Task 1
 - Не требует знания ускорения блока
 - Работает в фиксированном временном кадре `FTM_TS = 1 / FTM_FS`
-- Компенсация накапливается (интегратор), а не вычисляется заново каждый кадр
-- Минимальная задержка — один кадр (≈ 100–200 мкс)
-- Мягкое клиппирование (`SPA_SOFT_CLAMP`) — Task 2
+- Прямая пропорция `offset = K × Ve_smooth` (без интегратора) — **нулевая фазовая задержка**
+- Математически эквивалентен Klipper Pressure Advance
 - Плавный сброс offset при ретрактах (`SPA_RETRACT_DECAY`)
 - Per-block K (сохраняется при планировании) — устранён race condition при смене K во время движения
 
@@ -72,14 +70,13 @@ E_компенсация += K × ΔVe
 | `α` | Коэффициент EMA-фильтра (SPA_EMA_ALPHA) | — |
 | `E_planned[t]` | Плановое положение экструдера | мм |
 | `E_corrected[t]` | Скорректированное положение экструдера | мм |
-| `ΔVe[t]` | Изменение сглаженной скорости | мм/с |
-| `offset[t]` | Накопленная компенсация | мм |
+| `offset[t]` | Компенсация PA (offset = K × Ve_smooth) | мм |
 | `offset_max` | Максимальный лимит offset (PA_MAX_P_MM) | мм |
 | `FTM_FS` | Частота дискретизации FT Motion | Гц |
 | `FTM_TS` | Период кадра = 1 / FTM_FS | с |
 | `Q16` | Формат фиксированной точки: 16 дробных битов | — |
 
-### 2.2 Уравнения (v4.5)
+### 2.2 Уравнения (v4.6)
 
 **Шаг 1. Вычисление текущей скорости экструзии:**
 ```
@@ -96,38 +93,29 @@ Ve_smooth[t] = Ve_smooth[t-1] + α × (Ve[t] - Ve_smooth[t-1])
 ```
 При `α = 0.15` и `FTM_FS = 5000 Гц`: `τ ≈ 1.13 мс`.
 
-**Шаг 2. Вычисление изменения сглаженной скорости:**
+**Шаг 2. Прямая пропорция offset = K × Ve_smooth (только при экструзии):**
 ```
-ΔVe[t] = Ve_smooth[t] - Ve_smooth[t-1]                (2)
-```
-
-**Шаг 3. Вычисление приращения компенсации:**
-```
-Δoffset[t] = K × ΔVe[t]                                  (3)
+offset[t] = K × Ve_smooth[t]                              (2)
 ```
 
-**Шаг 4. Накопление компенсации (только при экструзии) с клиппингом:**
+**Шаг 2a. Жёсткий clamp по PA_MAX_P_MM:**
 ```
-offset[t] = offset[t-1] + Δoffset[t]
-
-// Мягкое клиппирование (SPA_SOFT_CLAMP):
-if (offset[t] > offset_max) {
-    excess = offset[t] - offset_max
-    offset[t] = offset_max + excess / 2    // затухание превышения на 50%
-}
+if (|offset[t]| > offset_max)
+    offset[t] = clamp(offset[t], -offset_max, +offset_max)
 ```
-Мягкое клиппирование заменяет жёсткий `clamp()`, который приводил к "ослеплению" интегратора: offset застревал на пределе, вызывая волнообразные артефакты (z-banding). При мягком клиппировании offset может кратковременно превышать лимит, но экспоненциально затухает к нему.
 
-**Шаг 4a. Затухание при ретракте (Retract Decay):**
+**Шаг 2b. Затухание при ретракте (Retract Decay):**
 ```
 Если не pa_extruding:
     offset[t] = offset[t-1] - offset[t-1] >> SPA_RETRACT_DECAY
 ```
 
-**Шаг 5. Скорректированное положение экструдера:**
+**Шаг 3. Скорректированное положение экструдера:**
 ```
-E_corrected[t] = E_planned[t] + offset[t]                (5)
+E_corrected[t] = E_planned[t] + offset[t]                (3)
 ```
+
+**Ключевое отличие от v4.5:** Вместо дифференциальной модели (ΔVe → интегратор → offset) используется прямая пропорция `offset = K × Ve_smooth`. Это устраняет фазовую задержку ~1.13 мс, которая была причиной недоэкструзии на разгонах и переэкструзии в углах. Мягкое клиппирование (`SPA_SOFT_CLAMP`) больше не требуется — интегратор устранён, windup невозможен.
 
 ### 2.3 Зачем нужно EMA-сглаживание?
 
@@ -144,10 +132,10 @@ E_corrected[t] = E_planned[t] + offset[t]                (5)
 ### 2.4 Анализ размерности
 
 ```
-Δoffset [мм] = K [с] × ΔVe [мм/с] = [мм] ✓
+offset [мм] = K [с] × Ve_smooth [мм/с] = [мм] ✓
 ```
 
-`K = 0.1` означает, что при изменении скорости экструзии на 10 мм/с компенсация составит 1 мм.
+`K = 0.1` означает, что при скорости экструзии 10 мм/с компенсация составит 1 мм.
 
 ### 2.5 Q16 — формат фиксированной точки
 
@@ -162,18 +150,19 @@ E_corrected[t] = E_planned[t] + offset[t]                (5)
 | Переменная | Тип | Описание | Q16 |
 |-----------|-----|----------|-----|
 | `ftmotion_pa_k_q16` | int32_t | K × 65536 | Q16 |
-| `spa_ve_prev_q16` | int32_t | Ve_smooth[t-1] × 65536 | Q16 |
 | `spa_ve_smooth_q16` | int32_t | Ve_smooth[t] × 65536 | Q16 |
 | `spa_ema_alpha_q16` | int32_t | α × 65536 | Q16 |
 | `spa_pa_offset_q16` | int64_t | offset[t] × 65536 | Q16 (хранится в int64_t) |
 | `pa_max_offset_q16` | int64_t | offset_max × 65536 | Q16 (0 = без лимита) |
 
-### 2.6 Поведение интегратора
+### 2.6 Поведение прямой пропорции (v4.6)
 
-SPA использует **накапливающийся** (интегрирующий) offset, что даёт:
-- **Плавность**: компенсация не дёргается при кратковременных флуктуациях
-- **Автоматический возврат к нулю**: после завершения движения ΔVe = 0 → offset перестаёт меняться
-- **Устойчивость**: интегратор не накапливает ошибку, так как ΔVe — знакопеременная величина
+SPA v4.6 использует **прямую пропорцию** `offset = K × Ve_smooth`, что даёт:
+- **Нулевая фазовая задержка**: offset вычисляется мгновенно из текущей сглаженной скорости, без ожидания накопления интегратора
+- **Автоматический возврат к нулю**: при остановке движения (Ve_smooth = 0) offset = 0
+- **Корректная компенсация на разгонах**: offset мгновенно следует за Ve_smooth — нет недоэкструзии в начале движения
+- **Чёткие углы**: offset начинает спадать одновременно со снижением Ve_smooth — нет задержки сброса давления
+- **Устойчивость**: отсутствие интегратора исключает windup; жёсткий clamp по PA_MAX_P_MM работает без побочных эффектов
 
 ---
 
@@ -206,9 +195,9 @@ SPA требует наличия **обоих** макросов в [`Configura
 - `SIMPLIFIED_PA` — управляет глобальными переменными, функциями установки/сброса
 - `PA_LOOKAHEAD` — управляет алгоритмом в `calc_traj_point()` и полями `block_t`
 
-Дополнительные макросы (v4.5):
+Дополнительные макросы (v4.6):
 - `SPA_EMA_ALPHA` — коэффициент EMA-фильтра (Task 1)
-- `SPA_SOFT_CLAMP` — мягкое клиппирование (Task 2)
+- ~~`SPA_SOFT_CLAMP`~~ — **устарел в v4.6+** (интегратор устранён, windup невозможен; используется жёсткий clamp)
 - `SPA_TELEMETRY` — вывод телеметрии
 - `SPA_PEAK_TRACKING` — пиковый offset в телеметрии (Task 3)
 - `SPA_RETRACT_DECAY` — затухание при ретрактах
@@ -219,10 +208,10 @@ SPA требует наличия **обоих** макросов в [`Configura
 
 ```cpp
 #if ENABLED(SIMPLIFIED_PA)
+// === SPA v4.6: Прямая пропорция offset = K × Ve_smooth (эквивалентно Klipper PA) ===
 int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
-static int32_t spa_ve_prev_q16 = 0;             // Предыдущая сглаженная скорость (Q16)
-static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — EMA
-static int64_t spa_pa_offset_q16 = 0;           // Накопленная компенсация (Q16 в int64_t)
+static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — EMA-фильтр
+static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve_smooth
 static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f);  // Лимит offset (из конфига)
 int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);       // Коэффициент EMA (Q16) из конфига
 
@@ -271,7 +260,6 @@ void ftmotion_pa_set_ema_alpha(float alpha) {
 
 ```cpp
 void ftmotion_pa_reset_state() {
-  spa_ve_prev_q16 = 0;
   spa_ve_smooth_q16 = 0;
   spa_pa_offset_q16 = 0;
   #if ENABLED(SPA_PEAK_TRACKING)
@@ -282,7 +270,7 @@ void ftmotion_pa_reset_state() {
 
 #### Основной алгоритм — [`calc_traj_point()`](Marlin/src/module/ft_motion.cpp:547)
 
-Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`):
+Псевдокод секции SIMPLIFIED_PA (внутри `#if ENABLED(PA_LOOKAHEAD)`), **v4.6 — прямая пропорция**:
 
 ```cpp
 block_t* current_block = stepper.get_current_block();
@@ -292,53 +280,48 @@ if (current_block && current_block->pa_active) {
   const float e_planned = traj_coords.e;
 
   // (1) Ve_raw в Q16
-  const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * FTM_FS);
+  const int32_t ve_curr_raw_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
 
   // (T1) EMA-фильтр: ve_smooth += alpha * (ve_raw - ve_smooth)
   const int32_t ve_diff_q16 = ve_curr_raw_q16 - spa_ve_smooth_q16;
   spa_ve_smooth_q16 += int32_t((int64_t(spa_ema_alpha_q16) * int64_t(ve_diff_q16)) >> 16);
 
-  // ΔVe от сглаженной скорости
-  const int32_t dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16;
-
-  // (2) Δoffset = K × ΔVe
-  const int64_t pa_delta_q16 = ((int64_t)block_K_q16 * (int64_t)dve_q16) >> 16;
-
   if (current_block->pa_extruding) {
-    spa_pa_offset_q16 += pa_delta_q16;
+    // (2) Прямая пропорция: offset = K × Ve_smooth
+    const int64_t pa_offset_new_q16 = ((int64_t)block_K_q16 * (int64_t)spa_ve_smooth_q16) >> 16;
 
-    // (3) Клиппинг (жёсткий или мягкий)
+    // (3) Жёсткий clamp по PA_MAX_P_MM (мягкое клиппирование не требуется — нет интегратора)
     if (pa_max_offset_q16 > 0) {
-      #if ENABLED(SPA_SOFT_CLAMP)
-        // Мягкое клиппирование: затухание превышения
-        if (spa_pa_offset_q16 > pa_max_offset_q16) {
-          const int64_t excess_q16 = spa_pa_offset_q16 - pa_max_offset_q16;
-          spa_pa_offset_q16 = pa_max_offset_q16 + (excess_q16 >> 1);
-        }
-        else if (spa_pa_offset_q16 < -pa_max_offset_q16) {
-          const int64_t excess_q16 = -pa_max_offset_q16 - spa_pa_offset_q16;
-          spa_pa_offset_q16 = -pa_max_offset_q16 - (excess_q16 >> 1);
-        }
-      #else
-        // Жёсткий clamp
-        if (spa_pa_offset_q16 > pa_max_offset_q16) ...
-        if (spa_pa_offset_q16 < -pa_max_offset_q16) ...
-      #endif
+      if (pa_offset_new_q16 > pa_max_offset_q16)
+        spa_pa_offset_q16 = pa_max_offset_q16;
+      else if (pa_offset_new_q16 < -pa_max_offset_q16)
+        spa_pa_offset_q16 = -pa_max_offset_q16;
+      else
+        spa_pa_offset_q16 = pa_offset_new_q16;
+    } else {
+      spa_pa_offset_q16 = pa_offset_new_q16;
     }
   }
   else {
-    // (4) Retract Decay: затухание при ретракте
+    // (4) Retract Decay: затухание при ретракте (по-прежнему накопленный offset)
     #if SPA_RETRACT_DECAY > 0
       spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
     #endif
   }
 
-  // (5) Обновление prev и применение offset
-  spa_ve_prev_q16 = spa_ve_smooth_q16;
+  // (5) Применение offset
   prev_traj_e = e_planned;
   traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
 }
 ```
+
+**Ключевые отличия от v4.5:**
+1. **Удалён** расчёт `dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16` — больше не нужен
+2. **Удалена** переменная `spa_ve_prev_q16` — хранение предыдущего Ve_smooth не требуется
+3. **Удалён** интегратор `spa_pa_offset_q16 += pa_delta_q16` — offset НЕ накапливается, а перезаписывается
+4. **Удалено** мягкое клиппирование (`SPA_SOFT_CLAMP`) — с прямым расчётом offset windup невозможен
+5. **offset вычисляется мгновенно** как `K × Ve_smooth` — нулевая фазовая задержка
+6. `pa_offset_new_q16` — **локальная** переменная; при экструзии offset полностью пересчитывается каждый кадр
 
 ### 3.5 Вспомогательные структуры данных
 
@@ -378,7 +361,7 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 | Файл | Строки | Описание |
 |------|--------|----------|
-| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, `SPA_EMA_ALPHA`, `SPA_SOFT_CLAMP`, `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_RETRACT_DECAY` |
+| [`Configuration_adv.h`](Marlin/Configuration_adv.h:4904) | Defines: `SIMPLIFIED_PA`, `PA_LOOKAHEAD`, `SPA_EMA_ALPHA`, ~~`SPA_SOFT_CLAMP`~~ (устарел в v4.6+), `SPA_TELEMETRY`, `SPA_PEAK_TRACKING`, `PA_MAX_P_MM`, `SPA_RETRACT_DECAY` |
 
 ### 4.2 Ядро SPA
 
@@ -470,7 +453,19 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 ## 6. История изменений
 
-### v4.5-beta2 — текущая версия
+### v4.6 — текущая версия (рекомендуется)
+
+| Дата | Изменение | Задача |
+|------|-----------|--------|
+| 2026-07-11 | **Кардинальное изменение алгоритма:** дифференциальная модель `offset[t] = offset[t-1] + K·ΔVe` заменена на **прямую пропорцию** `offset[t] = K·Ve_smooth` | v4.6 |
+| 2026-07-11 | Удалена переменная `spa_ve_prev_q16` — хранение предыдущей Ve_smooth больше не требуется | v4.6 |
+| 2026-07-11 | Удалён интегратор `spa_pa_offset_q16 += pa_delta_q16` — offset перезаписывается, а не накапливается | v4.6 |
+| 2026-07-11 | Удалён расчёт `dve_q16` (ΔVe) — больше не нужен | v4.6 |
+| 2026-07-11 | `SPA_SOFT_CLAMP` помечен как устаревший — с прямым расчётом offset windup интегратора невозможен | v4.6 |
+| 2026-07-11 | Жёсткий clamp по `PA_MAX_P_MM` применяется к `K·Ve_smooth`, а не к накопленному offset | v4.6 |
+| 2026-07-11 | SPA v4.6 математически **эквивалентен Klipper Pressure Advance** | v4.6 |
+
+### v4.5-beta2 — архив
 
 | Дата | Изменение | Задача |
 |------|-----------|--------|
@@ -497,4 +492,4 @@ PA|K=0.100 Ve=45.2 dVe=12.7 Off=1.27 OffPeak=1.50 alpha=0.15
 
 ---
 
-*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.5 реализует дифференциальную модель (K·ΔVe) с EMA-сглаживанием скорости, мягким клиппированием и динамическим лимитом offset, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения.*
+*Документация составлена на основе исходного кода Marlin Firmware (ветка bugfix-2.1.x). Алгоритм SPA v4.6 реализует пропорциональную модель offset = K·Ve_smooth (эквивалент Klipper PA) с EMA-сглаживанием скорости, жёстким clamp по PA_MAX_P_MM и Retract Decay, работающую в фиксированном временном кадре FT Motion. Per-block K устраняет race condition при смене K во время движения.*

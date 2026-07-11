@@ -52,11 +52,10 @@
 FTMotion ftMotion;
 
 #if ENABLED(SIMPLIFIED_PA)
-// === SPA v4.5: Дифференциальная модель (K·ΔVe) с EMA-сглаживанием и soft-clamp ===
+// === SPA v4.6: Прямая пропорция offset = K × Ve_smooth (эквивалентно Klipper PA) ===
 int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
-static int32_t spa_ve_prev_q16 = 0;             // Предыдущая скорость экструзии (Q16)
-static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — Task 1: EMA-фильтр
-static int64_t spa_pa_offset_q16 = 0;           // Накопленная компенсация PA (Q16 в int64_t)
+static int32_t spa_ve_smooth_q16 = 0;           // Сглаженная скорость (Q16) — EMA-фильтр
+static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve_smooth
 static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
 int32_t spa_ema_alpha_q16 = int32_t(SPA_EMA_ALPHA * 65536.0f);      // Коэффициент EMA (Q16) из конфига
 
@@ -83,7 +82,6 @@ void ftmotion_pa_set_ema_alpha(float alpha) {
 
 // Сброс состояния PA (вызывается при G92 E0, M600, разрыве филамента)
 void ftmotion_pa_reset_state() {
-  spa_ve_prev_q16 = 0;
   spa_ve_smooth_q16 = 0;
   spa_pa_offset_q16 = 0;
   #if ENABLED(SPA_PEAK_TRACKING)
@@ -541,7 +539,7 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
 
 #if ENABLED(PA_LOOKAHEAD)
   #if ENABLED(SIMPLIFIED_PA)
-    // === SPA v4.5: Дифференциальная модель (K·ΔVe) + EMA сглаживание + soft-clamp ===
+    // === SPA v4.6: Прямая пропорция offset = K × Ve_smooth (эквивалентно Klipper PA) ===
     block_t* current_block = stepper.get_current_block();
 
     if (current_block && current_block->pa_active) {
@@ -559,51 +557,34 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
       const int32_t ve_diff_q16 = ve_curr_raw_q16 - spa_ve_smooth_q16;
       spa_ve_smooth_q16 += int32_t((int64_t(spa_ema_alpha_q16) * int64_t(ve_diff_q16)) >> 16);
 
-      // Используем сглаженную скорость для расчёта dVe
-      const int32_t dve_q16 = spa_ve_smooth_q16 - spa_ve_prev_q16;
-
-      // (2) Приращение компенсации [Δoffset = K × dVe]
-      // Используем block_K_q16 (из блока), а не глобальный ftmotion_pa_k_q16
-      const int64_t pa_delta_q16 = ((int64_t)block_K_q16 * (int64_t)dve_q16) >> 16;
-
       if (current_block->pa_extruding) {
-        // (3) Накопление offset в int64_t для защиты от переполнения
-        spa_pa_offset_q16 += pa_delta_q16;
+        // (2) Прямая пропорция: offset = K × Ve_smooth (без интегратора, без фазовой задержки)
+        const int64_t pa_offset_new_q16 = ((int64_t)block_K_q16 * (int64_t)spa_ve_smooth_q16) >> 16;
 
-        // (4) Клиппинг — выбор между жёстким и мягким (Task 2)
+        // (3) Жёсткий клиппинг по PA_MAX_P_MM (windup невозможен — нет интегратора)
         if (pa_max_offset_q16 > 0) {
-          #if ENABLED(SPA_SOFT_CLAMP)
-            // Мягкое клиппирование (Soft Saturation / Anti-Windup)
-            // Если offset превышает лимит, накопление замедляется на 50%,
-            // и offset возвращается к лимиту с экспоненциальной скоростью.
-            if (spa_pa_offset_q16 > pa_max_offset_q16) {
-              const int64_t excess_q16 = spa_pa_offset_q16 - pa_max_offset_q16;
-              spa_pa_offset_q16 = pa_max_offset_q16 + (excess_q16 >> 1);
-            }
-            else if (spa_pa_offset_q16 < -pa_max_offset_q16) {
-              const int64_t excess_q16 = -pa_max_offset_q16 - spa_pa_offset_q16;
-              spa_pa_offset_q16 = -pa_max_offset_q16 - (excess_q16 >> 1);
-            }
-          #else
-            // Жёсткий clamp (оригинальное поведение v4.4)
-            if (spa_pa_offset_q16 > pa_max_offset_q16) spa_pa_offset_q16 = pa_max_offset_q16;
-            if (spa_pa_offset_q16 < -pa_max_offset_q16) spa_pa_offset_q16 = -pa_max_offset_q16;
-          #endif
+          if (pa_offset_new_q16 > pa_max_offset_q16)
+            spa_pa_offset_q16 = pa_max_offset_q16;
+          else if (pa_offset_new_q16 < -pa_max_offset_q16)
+            spa_pa_offset_q16 = -pa_max_offset_q16;
+          else
+            spa_pa_offset_q16 = pa_offset_new_q16;
+        } else {
+          spa_pa_offset_q16 = pa_offset_new_q16;
         }
       }
       else {
-        // (4a) Retract Decay: плавный сброс offset при ретрактах
+        // (4) Retract Decay: плавный сброс offset при ретрактах
         #if SPA_RETRACT_DECAY > 0
           spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
         #endif
       }
 
-      // (5) Обновление предыдущих значений
-      spa_ve_prev_q16 = spa_ve_smooth_q16;
-      prev_traj_e = e_planned;
-
-      // (6) Применение компенсации (Q16 → float)
+      // (5) Применение компенсации (Q16 → float)
       traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
+
+      // (6) Обновление prev_traj_e для вычисления Ve_raw в следующем кадре
+      prev_traj_e = e_planned;
     }
   #else
     // Стандартный LA Marlin (если PA_LOOKAHEAD включён, но SIMPLIFIED_PA выключен)
