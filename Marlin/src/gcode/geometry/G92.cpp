@@ -24,8 +24,8 @@
 #include "../../module/motion.h"
 #include "../../module/planner.h"
 
-#if ENABLED(SIMPLIFIED_PA)
-#include "../../module/ft_motion.h"  // Для ftmotion_pa_reset_state()
+#if ENABLED(LAPA)
+#include "../../module/ft_motion.h"  // Для lapa_reset_state()
 #endif
 
 #if ENABLED(I2C_POSITION_ENCODERS)
@@ -131,9 +131,9 @@ void GcodeSuite::G92() {
 
 IF_DISABLED(DIRECT_STEPPING, motion.report_position());
 
-#if ALL(PA_LOOKAHEAD, SIMPLIFIED_PA)
+#if ALL(PA_LOOKAHEAD, LAPA)
 if (parser.seenval('E')) {
-  ftmotion_pa_reset_state();
+  lapa_reset_state();
   planner.pa_flush_queue();
 }
 #endif

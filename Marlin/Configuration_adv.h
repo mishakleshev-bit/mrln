@@ -2473,7 +2473,7 @@
  *
  * See https://marlinfw.org/docs/features/lin_advance.html for full instructions.
  */
-//#define LIN_ADVANCE  // 🔧 Отключён для SPA v4.5. Используется только SIMPLIFIED_PA
+//#define LIN_ADVANCE  // 🔧 Отключён — используется LAPA v1.0
 
 #if ANY(LIN_ADVANCE, FT_MOTION)
   #if ENABLED(DISTINCT_E_FACTORS)
@@ -4902,91 +4902,61 @@
 
 
 //===========================================================================
-//=============== SIMPLIFIED PRESSURE ADVANCE (SPA) v4.10 ===================
+//=============== LOOKAHEAD PRESSURE ADVANCE (LAPA) v1.1 ====================
 //===========================================================================
-// SPA — Simplified Pressure Advance для Marlin FT Motion
-// Пропорциональная модель offset = K × Ve + Asymmetric Slew Rate Limiter.
+// LAPA — LookAhead Pressure Advance для Marlin FT Motion
+// Предкомпенсация offset = K × Ve_lookahead с опережением на LOOKAHEAD_FRAMES.
 //
-// Для активации необходимы ОБА макроса: SIMPLIFIED_PA и PA_LOOKAHEAD.
+// Для активации необходимы ОБА макроса: LAPA и PA_LOOKAHEAD.
 //
-// v4.10: Асимметричный SRL — при снижении offset (Ve падает) лимит ослаблен
-//        в SPA_SRL_DECAY_FACTOR (8) раз. Исправляет микронаплывы на выходах
-//        из углублений (notch exit), не влияя на защиту от пропуска шагов.
-// Подробнее: docs/SPA_Documentation.md
+// v1.1: True Block-Level Lookahead + Adaptive Window.
+//   - offset = K × ve_lookahead(Ve_curr, Ve_next, α)
+//   - Читает next_block из буфера planner.get_future_block(0)
+//   - ve_next = ve_curr × (nominal_speed_next / nominal_speed_curr)
+//   - Adaptive window: required_frames = |K×ΔVe| / MVS_ceiling
+//   - Alpha-blend: ve_target = lerp(Ve_curr, Ve_next, α)
+//   - Decay-to-zero для последнего блока в буфере
+//   - MVS ceiling: dO/frame ≤ Vf_max/FTM_FS
 
 #if ENABLED(FT_MOTION)
-  #define SIMPLIFIED_PA                     // Включает функции установки/сброса K, reset_state
-  #define PA_LOOKAHEAD                      // Включает основной алгоритм в calc_traj_point() и поля block_t
+  #define LAPA                              // Включает LAPA в calc_traj_point()
+  #define PA_LOOKAHEAD                      // Включает поля block_t (pa_K_q16 и др.)
+  #define LAPA_ADAPTIVE_LOOKAHEAD           // Адаптивное окно упреждения
 
-  #if ENABLED(SIMPLIFIED_PA)
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // Task 1: Сглаживание скорости (EMA Low-Pass Filter) — УСТАРЕЛО в v4.7+
-    // ──────────────────────────────────────────────────────────────────────────
-    // FT Motion генерирует траекторию на 5 кГц (фиксированный такт).
-    // Разность соседних кадров даёт чистый Ve без микро-сегментных шумов.
-    // EMA-фильтр создавал фазовую задержку ~1.13 мс (при α=0.15),
-    // что приводило к кратковременной недоэкструзии после углов.
-    //#define SPA_EMA_ALPHA          0.15f     // Устарел в v4.7+
+  #if ENABLED(LAPA)
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Task 2: Мягкое клиппирование (Soft Saturation / Anti-Windup) — УСТАРЕЛО в v4.6+
-    // ──────────────────────────────────────────────────────────────────────────
-    // С переходом на offset = K × Ve (прямая пропорция) windup интегратора устранён.
-    // Мягкое клиппирование больше не требуется — используется жёсткий clamp по PA_MAX_P_MM.
-    //#define SPA_SOFT_CLAMP                  // Устарел в v4.6+
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // Task 3: Телеметрия и пиковый offset
-    // ──────────────────────────────────────────────────────────────────────────
-    //#define SPA_TELEMETRY                   // Вывод PA|K=... Ve=... в терминал
-    //#define SPA_PEAK_TRACKING               // Отслеживание пикового offset
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // Task 4: Параметры ограничения
+    // Task 1: Абсолютный лимит offset
     // ──────────────────────────────────────────────────────────────────────────
     #define PA_MAX_P_MM            2.0f      // Лимит давления (мм). M900 L<value>
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Task 5: Asymmetric Dynamic Volumetric Slew Rate Limiter (SPA v4.10).
+    // Task 2: Lookahead Pre-compensation
     // ──────────────────────────────────────────────────────────────────────────
-    // Ограничивает скорость изменения pressure offset на основе доступного
-    // запаса объёмного расхода: avail = Q_max / A_fil - |Ve|.
-    //
-    // АСИММЕТРИЯ (ключевое улучшение v4.10):
-    //   offset растёт (Ve растёт) →  полный SRL: δ_max = avail / FTM_FS
-    //     Защита от пропуска шагов — нельзя толкать филамент быстрее плавления.
-    //   offset падает (Ve падает) →  ослабленный SRL: δ_max × SPA_SRL_DECAY_FACTOR
-    //     Замедление подачи безопасно — нет риска stall.
-    //
-    // Исправляет микронаплывы на выходах из углублений (notch exit):
-    // симметричный SRL создавал lag 0.003mm (21% ошибка на низких Ve),
-    // асимметричный снижает lag до 0.0004mm (2.7% — невидимо).
-    //
-    // Как подобрать:
-    //   1) Измерьте MVS (Max Volumetric Speed) хотенда для вашего
-    //      филамента и температуры.
-    //   2) #define SPA_PA_MAX_VOLFLOW = измеренное MVS [мм³/с].
-    //   3) M900 R<value> — динамическая смена на лету.
-    //
-    // По умолчанию: 15 мм³/с (консервативно).
-    #define SPA_PA_MAX_VOLFLOW    15.0f     // [мм³/с] Max объёмный расход. M900 R<value>
+    // LAPA_LOOKAHEAD_FRAMES — fallback для случая когда нет next_block.
+    // При LAPA_ADAPTIVE_LOOKAHEAD окно рассчитывается динамически:
+    //   required_frames = |K × ΔVe| / (Vf_max / FTM_FS)
+    //   actual_lookahead = max(LAPA_MIN_LOOKAHEAD, required_frames)
+    #define LAPA_LOOKAHEAD_FRAMES  256       // [16-512] fallback кадров
+    #define LAPA_MIN_LOOKAHEAD     256       // [16-512] мин. окно при adaptive
 
-    // Коэффициент асимметрии SRL.
-    // При delta_offset < 0 (Ve падает, offset снижается) лимит слабее в N раз.
-    // Значение 8 → lag 0.0004mm на 90° угле, ошибка 2.7% (невидимо).
-    // 4 = консервативно, 8 = рекомендовано, 32 = агрессивно.
-    #define SPA_SRL_DECAY_FACTOR   8         // [раз] Множитель для ветки падения offset
+    // ──────────────────────────────────────────────────────────────────────────
+    // Task 3: Максимальный объёмный расход (MVS ceiling)
+    // ──────────────────────────────────────────────────────────────────────────
+    // Лимит скорости изменения offset: dO/frame ≤ Vf_max / FTM_FS
+    // Где Vf_max = volflow / A_filament
+    #define LAPA_MAX_VOLFLOW     15.0f      // [мм³/с] Max объёмный расход. M900 R<value>
 
-    // Коэффициент затухания offset при ретрактах (битовый сдвиг).
+    // ──────────────────────────────────────────────────────────────────────────
+    // Task 4: Затухание offset при ретрактах
+    // ──────────────────────────────────────────────────────────────────────────
     // 0 = отключено; 4 = >>4 т.е. ~1/16 за кадр (рекомендуется)
-    #define SPA_RETRACT_DECAY      4
+    #define LAPA_RETRACT_DECAY     4
 
     // ─── Тюнинг через G-код (runtime) ────────────────────────────────────────
     // M900 K<value>   — K (0.0–2.0 с)
     // M900 L<value>   — PA_MAX_P_MM (0.1–10.0 мм)
-    // M900 R<value>   — SPA_PA_MAX_VOLFLOW (0 = unlimited, >0 = мм³/с)
-    // M900 E<alpha>   — Устарел в v4.7+ (игнорируется)
+    // M900 R<value>   — LAPA_MAX_VOLFLOW (0 = unlimited, >0 = мм³/с)
     // ──────────────────────────────────────────────────────────────────────────
 
   #endif

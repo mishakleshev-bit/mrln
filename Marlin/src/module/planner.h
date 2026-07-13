@@ -321,7 +321,7 @@ typedef struct PlannerBlock {
 
   #if ENABLED(PA_LOOKAHEAD)
     int32_t pa_K_q16;                       // K для этого блока (защита от смены на лету)
-    bool pa_active;                         // Флаг активности SPA
+    bool pa_active;                         // Флаг активности LAPA
     bool pa_extruding;                      // Флаг экструзии (steps.e > 0)
   #endif
 
@@ -501,9 +501,9 @@ struct PlannerHints {
   PlannerHints(const float mm=0.0f) : millimeters(mm) {}
 };
 
-// Forward declaration для SPA (глобальная функция из ft_motion.cpp)
-#if ENABLED(SIMPLIFIED_PA)
-  void ftmotion_pa_set_k(float k_new);
+// Forward declaration для LAPA (глобальная функция из ft_motion.cpp)
+#if ENABLED(LAPA)
+  void lapa_set_k(float k_new);
 #endif
 
 class Planner {
@@ -600,9 +600,9 @@ class Planner {
         extruder_advance_K[E_INDEX_N(e)] = k;
         TERN_(SMOOTH_LIN_ADVANCE, extruder_advance_K_q27[E_INDEX_N(e)] = k * _BV32(27));
 
-        // Синхронизация SPA: все вызовы set_advance_k() обновляют ftmotion_pa_k_q16
-        #if ENABLED(SIMPLIFIED_PA)
-          ftmotion_pa_set_k(k);
+        // Синхронизация LAPA: все вызовы set_advance_k() обновляют lapa_k_q16
+        #if ENABLED(LAPA)
+          lapa_set_k(k);
         #endif
       }
       static float get_advance_k(const uint8_t e=motion.extruder) {

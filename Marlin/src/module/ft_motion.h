@@ -426,17 +426,21 @@ class FTMotion {
     static bool plan_next_block();
     static void ensure_extruder_float_precision() IF_DISABLED(HAS_EXTRUDERS, {});
 
+    #if ENABLED(LAPA)
+      friend void lapa_reset_state();
+    #endif
+
 }; // class FTMotion
 
 extern FTMotion ftMotion; // Use ftMotion.thing, not FTMotion::thing.
 
-#if ENABLED(SIMPLIFIED_PA)
-extern int32_t ftmotion_pa_k_q16;
-void ftmotion_pa_reset_state();
-void ftmotion_pa_set_k(float k_new);
-void ftmotion_pa_set_max_offset(float max_offset_mm);  // Task 4: M900 L<value>
-void ftmotion_pa_set_max_volflow(float volflow_mm3_s); // Task 5: M900 R<value> (мм³/с)
-inline float ftmotion_pa_get_k() { return ftmotion_pa_k_q16 / 65536.0f; }
+#if ENABLED(LAPA)
+extern int32_t lapa_k_q16;
+void lapa_reset_state();
+void lapa_set_k(float k_new);
+void lapa_set_max_offset(float max_offset_mm);  // M900 L<value>
+void lapa_set_max_volflow(float volflow_mm3_s); // M900 R<value>
+inline float lapa_get_k() { return lapa_k_q16 / 65536.0f; }
 #endif
 
 /**

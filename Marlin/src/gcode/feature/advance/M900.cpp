@@ -28,8 +28,8 @@
 #include "../../../module/planner.h"
 #include "../../../module/stepper.h"
 
-#if ENABLED(SIMPLIFIED_PA)
-// Подключаем заголовок FT Motion для доступа к функциям PA
+#if ENABLED(LAPA)
+// Подключаем заголовок FT Motion для доступа к функциям LAPA
 #include "../../../module/ft_motion.h"
 #endif
 
@@ -118,43 +118,32 @@ void GcodeSuite::M900() {
         echo_value_oor('K');
     }
 
-// SPA-специфичные команды (L, E, S) обрабатываются в отдельных блоках
+// LAPA-специфичные команды (L, R) обрабатываются здесь
 // K обрабатывается стандартным механизмом planner.set_advance_k(),
-// который уже вызывает ftmotion_pa_set_k() через #if ENABLED(SIMPLIFIED_PA)
-#if ENABLED(SIMPLIFIED_PA)
-// Task 4: Динамический PA_MAX_P_MM через M900 L<value>
+// который уже вызывает lapa_set_k() через #if ENABLED(LAPA)
+#if ENABLED(LAPA)
+// Динамический LAPA max offset через M900 L<value>
 if (parser.seenval('L')) {
   const float l = parser.value_float();
   if (WITHIN(l, 0.1f, 10.0f)) {
-    ftmotion_pa_set_max_offset(l);
-    SERIAL_ECHOLNPGM("SPA PA_MAX_P_MM set to ", l, " mm");
+    lapa_set_max_offset(l);
+    SERIAL_ECHOLNPGM("LAPA max offset set to ", l, " mm");
   } else {
     SERIAL_ECHOLNPGM("!L out of range (0.1-10.0)");
   }
 }
-// Task 1: Установка EMA-альфа через M900 E<alpha> — УСТАРЕЛО в v4.7+
-// EMA-фильтр удалён: траектория FT Motion на 5 кГц уже гладкая,
-// дополнительное сглаживание вносило фазовую задержку ~1.13 мс.
-if (parser.seenval('E')) {
-  SERIAL_ECHOLNPGM("!SPA v4.7+ does not use EMA filter. Ignoring E parameter.");
-}
-if (parser.seenval('S')) {
-  SERIAL_ECHOLNPGM("SPA: Tau deprecated. Use K only (derivative model).");
-}
-// Task 5: Dynamic Volumetric SRL через M900 R<max_volflow_mm3_s>
-// Устанавливает максимальный объёмный расход хотенда (мм³/с).
-// Используется для динамического расчёта SRL: d(offset)/dt ≤ V_f_max - |Ve|
-// R0 = unlimited (не рекомендуется). По умолчанию: SPA_PA_MAX_VOLFLOW.
+// Установка максимального объёмного расхода через M900 R<max_volflow_mm3_s>
+// R0 = unlimited. По умолчанию: LAPA_MAX_VOLFLOW.
 if (parser.seenval('R')) {
   const float r = parser.value_float();
   if (r < 0) {
     SERIAL_ECHOLNPGM("!R out of range (>= 0)");
   } else if (r == 0) {
-    ftmotion_pa_set_max_volflow(9999.0f); // unlimited
-    SERIAL_ECHOLNPGM("SPA PA volumetric SRL: unlimited");
+    lapa_set_max_volflow(9999.0f); // unlimited
+    SERIAL_ECHOLNPGM("LAPA max volflow: unlimited");
   } else {
-    ftmotion_pa_set_max_volflow(r);
-    SERIAL_ECHOLNPGM("SPA PA volumetric SRL set to ", r, " mm^3/s");
+    lapa_set_max_volflow(r);
+    SERIAL_ECHOLNPGM("LAPA max volflow set to ", r, " mm^3/s");
   }
 }
 #endif

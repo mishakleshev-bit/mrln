@@ -2488,7 +2488,7 @@ bool Planner::_populate_block(
   #endif
   #if ENABLED(PA_LOOKAHEAD)
     block->pa_K_q16 = int32_t(planner.get_advance_k(extruder) * 65536.0f);  // K в формате Q16 (умножено на 65536)
-    block->pa_active = true;                                                 // SPA активен для этого блока
+    block->pa_active = true;                                                 // LAPA активен для этого блока
     block->pa_extruding = (block->steps.e > 0);                              // Есть ли шаги экструдера
   #endif
   // Formula for the average speed over a 1 step worth of distance if starting from zero and

@@ -51,47 +51,40 @@
 
 FTMotion ftMotion;
 
-#if ENABLED(SIMPLIFIED_PA)
-// === SPA v4.10: Прямая пропорция offset = K × Ve + Asymmetric Dynamic Volumetric SRL ===
-int32_t ftmotion_pa_k_q16 = 0;                  // K в Q16 (K_float × 65536)
-static int64_t spa_pa_offset_q16 = 0;           // Компенсация PA (Q16 в int64_t), offset = K × Ve
-static int64_t pa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset (из конфига)
+#if ENABLED(LAPA)
+// === LAPA v1.0: Lookahead Pre-compensation ===
+int32_t lapa_k_q16 = 0;                        // K в Q16 (K_float × 65536)
+static int64_t lapa_offset_q16 = 0;            // Компенсация PA (Q16), offset = K × ve_lookahead
+static int64_t lapa_max_offset_q16 = int64_t(PA_MAX_P_MM * 65536.0f); // Лимит offset
 
 // Максимальная скорость филамента (V_f_max = Q_max / A_filament) в Q16.
-// Определяет предел: |Ve + d(offset)/dt| ≤ V_f_max.
-// Хранится как Q16 static, обновляется через ftmotion_pa_set_max_volflow().
-static int64_t spa_v_filament_max_q16 = int64_t(
-  (SPA_PA_MAX_VOLFLOW) / ((PI * 0.875f * 0.875f)) * 65536.0f
+// Используется как MVS ceiling: dO/frame ≤ Vf_max / FTM_FS
+static int64_t lapa_v_filament_max_q16 = int64_t(
+  (LAPA_MAX_VOLFLOW) / ((PI * 0.875f * 0.875f)) * 65536.0f
 );
 
-#if ENABLED(SPA_PEAK_TRACKING)
-  static int64_t spa_peak_offset_q16 = 0;       // Пиковый |offset| за период телеметрии — Task 3
-#endif
-
-// Установка K из G-кода (вызов из M900.cpp и planner.set_advance_k())
-void ftmotion_pa_set_k(float k_new) {
-  ftmotion_pa_k_q16 = int32_t(k_new * 65536.0f);
+// Установка K из G-кода
+void lapa_set_k(float k_new) {
+  lapa_k_q16 = int32_t(k_new * 65536.0f);
 }
 
-// Task 4: Установка PA_MAX_P_MM в рантайме (M900 L<value>)
-void ftmotion_pa_set_max_offset(float max_offset_mm) {
-  pa_max_offset_q16 = int64_t(max_offset_mm * 65536.0f);
+// Установка PA_MAX_P_MM в рантайме (M900 L<value>)
+void lapa_set_max_offset(float max_offset_mm) {
+  lapa_max_offset_q16 = int64_t(max_offset_mm * 65536.0f);
 }
 
-// Task 5: Установка SPA_PA_MAX_VOLFLOW в рантайме (M900 R<value>)
-// Динамический SRL: d(offset)/dt ≤ V_f_max - |Ve|
-// Где V_f_max = Q_max / A_filament (объёмный расход / площадь филамента)
-// R<mm3/s> = максимальный объёмный расход хотенда (типично 10-25 мм³/с)
-void ftmotion_pa_set_max_volflow(float volflow_mm3_s) {
-  spa_v_filament_max_q16 = int64_t(volflow_mm3_s / (PI * 0.875f * 0.875f) * 65536.0f);
+// Установка LAPA_MAX_VOLFLOW в рантайме (M900 R<value>)
+void lapa_set_max_volflow(float volflow_mm3_s) {
+  lapa_v_filament_max_q16 = int64_t(volflow_mm3_s / (PI * 0.875f * 0.875f) * 65536.0f);
 }
 
 // Сброс состояния PA (вызывается при G92 E0, M600, разрыве филамента)
-void ftmotion_pa_reset_state() {
-  spa_pa_offset_q16 = 0;
-  #if ENABLED(SPA_PEAK_TRACKING)
-    spa_peak_offset_q16 = 0;
-  #endif
+// ВАЖНО: синхронизируем prev_traj_e с endPos_prevBlock.e,
+// чтобы после G92 E0 не возникло разноса между e_planned (через startPos/endPos_prevBlock)
+// и prev_traj_e, который после pa_flush_queue() перестаёт обновляться ISR
+void lapa_reset_state() {
+  lapa_offset_q16 = 0;
+  FTMotion::prev_traj_e = FTMotion::endPos_prevBlock.e;
 }
 #endif
 
@@ -298,7 +291,7 @@ void FTMotion::reset() {
     last_traj_dir.reset();
     hold_frames.reset();
   #endif
-  TERN_(SIMPLIFIED_PA, ftmotion_pa_reset_state());  // Синхронизация состояния SPA при сбросе
+  TERN_(LAPA, lapa_reset_state());  // Синхронизация состояния LAPA при сбросе
   if (did_suspend) stepper.wake_up();
 }
 
@@ -543,82 +536,120 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
   LOGICAL_AXIS_MAP_LC(_SET_TRAJ);
 
 #if ENABLED(PA_LOOKAHEAD)
-  #if ENABLED(SIMPLIFIED_PA)
-    // === SPA v4.10: Прямая пропорция offset = K × Ve + Asymmetric Dynamic Volumetric SRL ===
+  #if ENABLED(LAPA)
+    // === LAPA v1.1: True Block-Level Lookahead + Adaptive Window ===
     block_t* current_block = stepper.get_current_block();
 
     if (current_block && current_block->pa_active) {
-      // Используем K, сохранённый в блоке при планировании (planner.cpp:2490),
-      // чтобы избежать race condition при смене K во время движения.
       const int32_t block_K_q16 = current_block->pa_K_q16;
       const float e_planned = traj_coords.e;
 
       // (1) Текущая скорость экструзии Ve [мм/с] в Q16
-      //     FT Motion на 5 кГц даёт чистую разность между соседними кадрами.
       const int32_t ve_curr_q16 = int32_t((e_planned - prev_traj_e) * 65536.0f * float(FTM_FS));
 
       if (current_block->pa_extruding) {
-        // (2) Целевой offset (прямая пропорция, как Klipper PA)
-        const int64_t target_offset_q16 = ((int64_t)block_K_q16 * (int64_t)ve_curr_q16) >> 16;
+        // (2) Lookahead: предсказываем Ve следующего блока через get_future_block(1)
+        //     total_frames = block_length / (nominal_speed / FTM_FS)
+        int64_t ve_target_q16 = ve_curr_q16;
 
-        // (3) Смещение относительно текущего offset (Δoffset = target - current)
-        int64_t delta_offset_q16 = target_offset_q16 - spa_pa_offset_q16;
+        if (dist > 0.0f && current_block->millimeters > 0 && current_block->nominal_speed > 0) {
+          const float mm_per_frame = current_block->nominal_speed / float(FTM_FS);
+          const float remaining_frames = (current_block->millimeters - dist) / mm_per_frame;
 
-        // (4) Asymmetric Dynamic Volumetric Slew Rate Limiter (SPA v4.10)
-        //     Основан на максимальном объёмном расходе хотенда (Q_max, мм³/с).
-        //     Ограничение: Ve + d(offset)/dt ≤ V_f_max = Q_max / A_filament
-        //     Асимметрия: offset растёт → жёсткий SRL (защита от stall),
-        //               offset падает → ослабленный ×SPA_SRL_DECAY_FACTOR.
-        if (spa_v_filament_max_q16 > 0) {
-          // Текущая скорость филамента: |Ve| в Q16
-          const int64_t ve_abs_q16 = (ve_curr_q16 >= 0) ? ve_curr_q16 : -ve_curr_q16;
-          // Доступный запас: V_f_max - |Ve|
-          const int64_t avail_q16 = spa_v_filament_max_q16 - ve_abs_q16;
-          // δ_max/кадр = V_f_max / FTM_FS (Q16).
-          // При avail ≤ 0 (overspeed) используем Vf_max/FS как fallback,
-          // чтобы offset мог снижаться (безопасный выход из overspeed).
-          const int64_t max_delta_frame_q16 = (avail_q16 > 0)
-            ? avail_q16 / int64_t(FTM_FS)
-            : spa_v_filament_max_q16 / int64_t(FTM_FS);
+          // Вычисляем lookahead window: adaptive или fallback
+          #if ENABLED(LAPA_ADAPTIVE_LOOKAHEAD)
+            const int32_t lookahead_frames = int32_t(LAPA_MIN_LOOKAHEAD);
+          #else
+            const int32_t lookahead_frames = int32_t(LAPA_LOOKAHEAD_FRAMES);
+          #endif
 
-          if (delta_offset_q16 > 0) {
-            // Offset растёт: полный SRL — защита от пропуска шагов
-            if (delta_offset_q16 > max_delta_frame_q16)
-              delta_offset_q16 = max_delta_frame_q16;
-          } else {
-            // Offset падает: ослабленный SRL — микронаплывы на notch exit
-            const int64_t decay_limit_q16 = max_delta_frame_q16 * (int64_t)SPA_SRL_DECAY_FACTOR;
-            if (delta_offset_q16 < -decay_limit_q16)
-              delta_offset_q16 = -decay_limit_q16;
+          if (remaining_frames < lookahead_frames) {
+            // True next-block prediction из буфера планировщика
+            block_t* next_block = planner.get_future_block(1);
+
+            if (next_block && next_block->is_move() && next_block->pa_extruding
+                && next_block->nominal_speed > 0) {
+              // Оценка ve_next через ratio nominal_speed:
+              //   ve_next ≈ ve_curr × (nominal_speed_next / nominal_speed_curr)
+              // float-based для избежания переполнения Q16
+              const float speed_ratio = next_block->nominal_speed / current_block->nominal_speed;
+              const float ve_next_f = (float)ve_curr_q16 * speed_ratio / 65536.0f;
+
+              #if ENABLED(LAPA_ADAPTIVE_LOOKAHEAD)
+                // Adaptive window: сколько кадров нужно для плавного перехода
+                const float delta_ve_f = (float)ve_curr_q16 / 65536.0f - ve_next_f;
+                const float target_offset_delta_f = block_K_q16 / 65536.0f * ABS(delta_ve_f);
+                const float mvs_per_frame_f = (lapa_v_filament_max_q16 > 0)
+                  ? float(lapa_v_filament_max_q16 / int64_t(FTM_FS)) / 65536.0f
+                  : 0.006236f; // fallback: Vf_max(6.236 мм/с) / FTM_FS(1000)
+                int32_t required_frames = int32_t(mvs_per_frame_f > 0.000001f
+                  ? target_offset_delta_f / mvs_per_frame_f + 0.5f
+                  : lookahead_frames);
+                NOLESS(required_frames, int32_t(LAPA_MIN_LOOKAHEAD));
+                const float adaptive_lookahead = float(required_frames);
+              #else
+                const float adaptive_lookahead = float(lookahead_frames);
+              #endif
+
+              const float alpha = 1.0f - remaining_frames / adaptive_lookahead;
+              const float alpha_clamped = _MIN(_MAX(alpha, 0.0f), 1.0f);
+
+              // ve_target = lerp(ve_curr, ve_next, alpha)
+              const int32_t ve_next_q16 = int32_t(ve_next_f * 65536.0f + 0.5f);
+              ve_target_q16 = int64_t(int64_t(ve_next_q16) * int64_t(alpha_clamped * 65536.0f + 0.5f)
+                             + int64_t(ve_curr_q16) * int64_t((1.0f - alpha_clamped) * 65536.0f + 0.5f)) >> 16;
+            }
+            else if (!next_block || !next_block->is_move()) {
+              // Последний блок в буфере: плавный decay offset к нулю
+              const float decay_alpha = remaining_frames / float(lookahead_frames);
+              const float decay_alpha_clamped = _MIN(_MAX(decay_alpha, 0.0f), 1.0f);
+              // ve_target = ve_curr × decay_alpha → 0 на конце блока
+              const float ve_decay_f = (float)ve_curr_q16 * decay_alpha_clamped / 65536.0f;
+              ve_target_q16 = int32_t(ve_decay_f * 65536.0f + 0.5f);
+            }
+            // else: next_block существует но не экструдирует — используем ve_curr
           }
         }
 
-        // (5) Применение ограниченного смещения
-        spa_pa_offset_q16 += delta_offset_q16;
+        // (3) Целевой offset: K × ve_target (прямая пропорция, без SRL)
+        const int64_t target_offset_q16 = ((int64_t)block_K_q16 * (int64_t)ve_target_q16) >> 16;
 
-        // (6) Жёсткий клиппинг по PA_MAX_P_MM (абсолютный лимит)
-        if (pa_max_offset_q16 > 0) {
-          if (spa_pa_offset_q16 > pa_max_offset_q16)
-            spa_pa_offset_q16 = pa_max_offset_q16;
-          else if (spa_pa_offset_q16 < -pa_max_offset_q16)
-            spa_pa_offset_q16 = -pa_max_offset_q16;
+        // (4) MVS ceiling safety check: dO/frame ≤ Vf_max / FTM_FS
+        int64_t delta_offset_q16 = target_offset_q16 - lapa_offset_q16;
+        if (lapa_v_filament_max_q16 > 0) {
+          const int64_t max_dO_q16 = lapa_v_filament_max_q16 / int64_t(FTM_FS);
+          if (delta_offset_q16 > max_dO_q16)
+            delta_offset_q16 = max_dO_q16;
+          else if (delta_offset_q16 < -max_dO_q16)
+            delta_offset_q16 = -max_dO_q16;
+        }
+
+        // (5) Применение
+        lapa_offset_q16 += delta_offset_q16;
+
+        // (6) Клиппинг по PA_MAX_P_MM
+        if (lapa_max_offset_q16 > 0) {
+          if (lapa_offset_q16 > lapa_max_offset_q16)
+            lapa_offset_q16 = lapa_max_offset_q16;
+          else if (lapa_offset_q16 < -lapa_max_offset_q16)
+            lapa_offset_q16 = -lapa_max_offset_q16;
         }
       }
       else {
-        // (7) Retract Decay: плавный сброс offset при ретрактах
-        #if SPA_RETRACT_DECAY > 0
-          spa_pa_offset_q16 -= spa_pa_offset_q16 >> SPA_RETRACT_DECAY;
+        // (7) Retract Decay
+        #if LAPA_RETRACT_DECAY > 0
+          lapa_offset_q16 -= lapa_offset_q16 >> LAPA_RETRACT_DECAY;
         #endif
       }
 
       // (8) Применение компенсации (Q16 → float)
-      traj_coords.e += (float)spa_pa_offset_q16 * (1.0f / 65536.0f);
+      traj_coords.e += (float)lapa_offset_q16 * (1.0f / 65536.0f);
 
-      // (9) Обновление prev_traj_e для вычисления Ve в следующем кадре
+      // (9) Обновление prev_traj_e
       prev_traj_e = e_planned;
     }
   #else
-    // Стандартный LA Marlin (если PA_LOOKAHEAD включён, но SIMPLIFIED_PA выключен)
+    // Стандартный LA Marlin (если PA_LOOKAHEAD включён, но LAPA выключен)
     #if FTM_HAS_LIN_ADVANCE
     {
       float traj_e = traj_coords.e;

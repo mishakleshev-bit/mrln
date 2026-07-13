@@ -3657,18 +3657,18 @@ void MarlinSettings::reset() {
         TERN_(SMOOTH_LIN_ADVANCE, stepper.set_advance_tau(linAdvanceTau[ALIM(e, linAdvanceTau)], e));
         TERN_(ADVANCE_K_EXTRA, other_extruder_advance_K[e] = k);
       }
-      #if ENABLED(SIMPLIFIED_PA)
-        // 🔧 Явная инициализация SPA K при загрузке настроек (первый extruder)
-        ftmotion_pa_set_k(linAdvanceK[0]);
+      #if ENABLED(LAPA)
+        // 🔧 Явная инициализация LAPA K при загрузке настроек (первый extruder)
+        lapa_set_k(linAdvanceK[0]);
       #endif
 
     #else // !DISTINCT_E_FACTORS
 
       planner.set_advance_k(ADVANCE_K);
       TERN_(SMOOTH_LIN_ADVANCE, stepper.set_advance_tau(ADVANCE_TAU));
-      #if ENABLED(SIMPLIFIED_PA)
-        // 🔧 Явная инициализация SPA K при загрузке настроек
-        ftmotion_pa_set_k(ADVANCE_K);
+      #if ENABLED(LAPA)
+        // 🔧 Явная инициализация LAPA K при загрузке настроек
+        lapa_set_k(ADVANCE_K);
       #endif
       #if ENABLED(ADVANCE_K_EXTRA)
         EXTRUDER_LOOP() other_extruder_advance_K[e] = ADVANCE_K;
