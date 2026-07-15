@@ -30,18 +30,12 @@
   #include "ft_motion/trajectory_poly5.h"
   #include "ft_motion/trajectory_poly6.h"
 #endif
-#if ENABLED(FTM_CONSTANT_JOLT)
-  #include "ft_motion/trajectory_constant_jolt.h"
-#endif
 #if ENABLED(RESONANCE_TEST)
   #include "../feature/resonance/resonance_generator.h"
 #endif
 
 #if HAS_FTM_SHAPING
   #include "ft_motion/shaping.h"
-#endif
-#if ENABLED(FTM_SMOOTHING)
-  #include "ft_motion/smoothing.h"
 #endif
 #include "ft_motion/stepping.h"
 
@@ -90,10 +84,6 @@ typedef struct FTConfig {
 
   #endif // HAS_FTM_SHAPING
 
-  #if ENABLED(FTM_SMOOTHING)
-    ft_smoothed_float_t smoothingTime;                    // Smoothing time. [s]
-  #endif
-
   #if ENABLED(FTM_POLYS)
     float poly6_acceleration_overshoot; // Overshoot factor for Poly6 (1.25 to 2.0)
   #endif
@@ -102,16 +92,6 @@ typedef struct FTConfig {
   #else
     static constexpr TrajectoryType trajectory_type = TrajectoryType::TRAPEZOIDAL;
   #endif
-  #if ENABLED(FTM_CONSTANT_JOLT)
-    float jolt = FTM_DEFAULT_JOLT * 1000.0f;  // (mm/s³) stored internally; FTM_DEFAULT_JOLT is in m/s³
-
-    void set_jolt(float j) {
-      LIMIT(j, 1000.0f, 10'000'000.0f);
-      prep_for_shaper_change();
-      jolt = j;
-    }
-  #endif
-
   static void prep_for_shaper_change();
   static void update_shaping_params();
 
@@ -241,7 +221,6 @@ typedef struct FTConfig {
     #endif // HAS_FTM_SHAPING
 
     TERN_(FTM_POLYS, poly6_acceleration_overshoot = FTM_POLY6_ACCELERATION_OVERSHOOT);
-    TERN_(FTM_CONSTANT_JOLT, jolt = FTM_DEFAULT_JOLT * 1000.0f);
 
     update_shaping_params();
   }
@@ -262,12 +241,6 @@ class FTMotion {
     static void set_defaults() {
       cfg.set_defaults();
 
-      #if ENABLED(FTM_SMOOTHING)
-        #define _RESET_SMOOTH(A) (void)set_smoothing_time(_AXIS(A), FTM_SMOOTHING_TIME_##A);
-        CARTES_MAP(_RESET_SMOOTH);
-        #undef _RESET_SMOOTH
-      #endif
-
       #if HAS_FTM_TRAJECTORY_SELECTION
         setTrajectoryType(TrajectoryType::FTM_TRAJECTORY_TYPE);
       #endif
@@ -281,13 +254,6 @@ class FTMotion {
     // Public methods
     static void init();
     static void loop();                                   // Controller main, to be invoked from non-isr task.
-
-    #if ENABLED(FTM_SMOOTHING)
-      // Refresh alpha and delay samples used by smoothing functions.
-      static void update_smoothing_params();
-      // Setters for smoothingTime that update alpha and delay
-      static bool set_smoothing_time(const AxisEnum axis, const float s_time);
-    #endif
 
     static void reset();                                  // Reset all states of the fixed time conversion to defaults.
 
@@ -359,9 +325,6 @@ class FTMotion {
       static Poly5TrajectoryGenerator poly5Generator;
       static Poly6TrajectoryGenerator poly6Generator;
     #endif
-    #if ENABLED(FTM_CONSTANT_JOLT)
-      static ConstantJoltTrajectoryGenerator cjGenerator;
-    #endif
     #if HAS_FTM_TRAJECTORY_SELECTION
       static TrajectoryType trajectoryType;
       static TrajectoryGenerator* currentGenerator;
@@ -383,11 +346,6 @@ class FTMotion {
       static shaping_t shaping; // Shaping data
     #endif
 
-    #if ENABLED(FTM_SMOOTHING)
-      // Smoothing data for XYZE axes
-      static smoothing_t smoothing;
-    #endif
-
     // Linear advance variables.
     #if HAS_EXTRUDERS
       static float prev_traj_e;
@@ -404,16 +362,12 @@ class FTMotion {
     static void prep_for_shaper_change() {
       // planner.synchronize guarantees that motion reached a standstill with no echoes pending execution (including a runout block)
       planner.synchronize();
-      // Due to smoothing, the end position may not have been reached exactly.
-      // This is normally fine, but if smoothing time changes, and we assume it was reached,
-      // it may cause discontinuities.
-      // Therefore, set the next starting position to the exact reached position.
+      // Set the next starting position to the exact reached position.
       endPos_prevBlock = last_target_traj;
       // We now know that we are not moving and there are no pending echoes,
-      // so set all shaping buffers to current position in case the new smoothing/shaping
+      // so set all shaping buffers to current position in case the new shaping
       // parameters force input shaping to look in a past position for echoes.
       shaping.fill(endPos_prevBlock);
-      TERN_(FTM_SMOOTHING, smoothing.fill(endPos_prevBlock));
       fastForwardUntilMotion = true;
     }
 

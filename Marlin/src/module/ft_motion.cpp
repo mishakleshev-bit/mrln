@@ -86,9 +86,6 @@ TrapezoidalTrajectoryGenerator FTMotion::trapezoidalGenerator;
   Poly5TrajectoryGenerator FTMotion::poly5Generator;
   Poly6TrajectoryGenerator FTMotion::poly6Generator;
 #endif
-#if ENABLED(FTM_CONSTANT_JOLT)
-  ConstantJoltTrajectoryGenerator FTMotion::cjGenerator;
-#endif
 #if HAS_FTM_TRAJECTORY_SELECTION
   TrajectoryType FTMotion::trajectoryType = TrajectoryType::FTM_TRAJECTORY_TYPE;
   TrajectoryGenerator* FTMotion::currentGenerator = &FTMotion::trapezoidalGenerator;
@@ -119,23 +116,6 @@ TrapezoidalTrajectoryGenerator FTMotion::trapezoidalGenerator;
     #endif
     #if ENABLED(FTM_SHAPER_E)
       , E:{ false, { 0.0f }, { 0.0f }, { 0 }, 0 }
-    #endif
-  };
-#endif
-
-#if ENABLED(FTM_SMOOTHING)
-  smoothing_t FTMotion::smoothing = {
-    #if HAS_X_AXIS
-      X:{ { 0.0f }, 0.0f, 0 },  // smoothing_pass[], alpha, delay_samples
-    #endif
-    #if HAS_Y_AXIS
-      Y:{ { 0.0f }, 0.0f, 0 },
-    #endif
-    #if HAS_Z_AXIS
-      Z:{ { 0.0f }, 0.0f, 0 },
-    #endif
-    #if HAS_EXTRUDERS
-      E:{ { 0.0f }, 0.0f, 0 }
     #endif
   };
 #endif
@@ -215,26 +195,6 @@ void FTMotion::loop() {
 
 #endif // HAS_FTM_SHAPING
 
-#if ENABLED(FTM_SMOOTHING)
-
-  #include "planner.h"
-
-  void FTMotion::update_smoothing_params() {
-    #define _SMOOTH_PARAM(A) smoothing.A.set_time(cfg.smoothingTime.A);
-    CARTES_MAP(_SMOOTH_PARAM);
-    smoothing.refresh_largest_delay_samples();
-  }
-
-  bool FTMotion::set_smoothing_time(const AxisEnum axis, float s_time) {
-    LIMIT(s_time, 0.0f, FTM_MAX_SMOOTHING_TIME);
-    prep_for_shaper_change();
-    cfg.smoothingTime[axis] = s_time;
-    update_smoothing_params();
-    return true;
-  }
-
-#endif // FTM_SMOOTHING
-
 // Reset all trajectory processing variables.
 void FTMotion::reset() {
   const bool did_suspend = stepper.suspend();
@@ -243,7 +203,6 @@ void FTMotion::reset() {
   stepping.reset();
   shaping.reset();
   fastForwardUntilMotion = true;
-  TERN_(FTM_SMOOTHING, smoothing.reset(););
 
   TERN_(HAS_EXTRUDERS, prev_traj_e = 0.0f);  // Reset linear advance variables.
   TERN_(DISTINCT_E_FACTORS, block_extruder_axis = E_AXIS);
@@ -275,12 +234,6 @@ void FTMotion::discard_planner_block_protected() {
 
 uint32_t FTMotion::calc_runout_samples() {
   xyze_long_t delay = {0};
-  #if ENABLED(FTM_SMOOTHING)
-    #define _DELAY_ADD(A) delay.A += smoothing.A.delay_samples;
-    LOGICAL_AXIS_MAP(_DELAY_ADD)
-    #undef _DELAY_ADD
-  #endif
-
   #if HAS_FTM_SHAPING
     // Ni[max_i] is the delay of the last pulse, but it is relative to Ni[0] (the negative delay centroid)
     #define _DELAY_ADD(A) if (shaping.A.ena) delay.A += shaping.A.Ni[shaping.A.max_i] - shaping.A.Ni[0];
@@ -306,7 +259,6 @@ void FTMotion::plan_runout_block() {
 // Initializes storage variables before startup.
 void FTMotion::init() {
   update_shaping_params();
-  TERN_(FTM_SMOOTHING, update_smoothing_params());
   TERN_(HAS_FTM_TRAJECTORY_SELECTION, setTrajectoryType(cfg.trajectory_type));
   reset(); // Precautionary.
 }
@@ -323,12 +275,6 @@ void FTMotion::init() {
         case TrajectoryType::POLY5:     currentGenerator = &poly5Generator;       break;
         case TrajectoryType::POLY6:     currentGenerator = &poly6Generator;       break;
       #endif
-      #if ENABLED(FTM_CONSTANT_JOLT)
-        case TrajectoryType::CONSTANT_JOLT:
-          cjGenerator.setJoltPtr(&cfg.jolt);
-          currentGenerator = &cjGenerator;
-          break;
-      #endif
     }
   }
 
@@ -341,9 +287,6 @@ void FTMotion::init() {
       #if ENABLED(FTM_POLYS)
         case TrajectoryType::POLY5:
         case TrajectoryType::POLY6:
-      #endif
-      #if ENABLED(FTM_CONSTANT_JOLT)
-        case TrajectoryType::CONSTANT_JOLT:
       #endif
         break;
     }
@@ -361,10 +304,6 @@ FSTR_P FTMotion::getTrajectoryName() {
     #if ENABLED(FTM_POLYS)
       case TrajectoryType::POLY5:     return GET_TEXT_F(MSG_FTM_POLY5);
       case TrajectoryType::POLY6:     return GET_TEXT_F(MSG_FTM_POLY6);
-    #endif
-    #if ENABLED(FTM_CONSTANT_JOLT)
-      case TrajectoryType::CONSTANT_JOLT: return GET_TEXT_F(MSG_FTM_CONSTANT_JOLT);
-    #endif
   }
 }
 
@@ -474,11 +413,6 @@ bool FTMotion::plan_next_block() {
       for (uint32_t i = 0; i < ftm_zmax; ++i) shaping.E.d_zi[i] += offset;
     #endif
 
-    // Offset extruder smoothing buffer
-    #if ENABLED(FTM_SMOOTHING)
-      for (uint8_t i = 0; i < FTM_SMOOTHING_ORDER; ++i) smoothing.E.smoothing_pass[i] += offset;
-    #endif
-
     // Offset linear advance previous position
     prev_traj_e += offset;
 
@@ -568,40 +502,16 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
     default: break;
   }
 
-  #if ANY(FTM_SMOOTHING, HAS_FTM_SHAPING)
-    uint32_t max_total_delay = 0;
-  #endif
-
-  #if ENABLED(FTM_SMOOTHING)
-
-    // Approximate Gaussian smoothing via chained EMAs
-    auto _smoothen = [&](const AxisEnum axis, axis_smoothing_t &smoo) {
-      if (smoo.alpha != 1.0f) {
-        float smooth_val = traj_coords[axis];
-        for (uint8_t _i = 0; _i < FTM_SMOOTHING_ORDER; ++_i) {
-          smoo.smoothing_pass[_i] += (smooth_val - smoo.smoothing_pass[_i]) * smoo.alpha;
-          smooth_val = smoo.smoothing_pass[_i];
-        }
-        traj_coords[axis] = smooth_val;
-      }
-    };
-
-    #define _SMOOTHEN(A) _smoothen(_AXIS(A), smoothing.A);
-    CARTES_MAP(_SMOOTHEN);
-
-    max_total_delay += smoothing.largest_delay_samples;
-
-  #endif // FTM_SMOOTHING
-
   #if HAS_FTM_SHAPING
+    uint32_t max_total_delay = 0;
 
     if (ftMotion.cfg.axis_sync_enabled)
       max_total_delay += shaping.largest_delay_samples;
 
     // Apply shaping if active on each axis
-    auto _shape = [&](const AxisEnum axis, axis_shaping_t &shap OPTARG(FTM_SMOOTHING, const axis_smoothing_t &smoo)) {
+    auto _shape = [&](const AxisEnum axis, axis_shaping_t &shap) {
       const uint32_t group_delay = ftMotion.cfg.axis_sync_enabled
-          ? max_total_delay - TERN0(FTM_SMOOTHING, smoo.delay_samples)
+          ? max_total_delay
           : -shap.Ni[0];
       //
       // α = 1 − exp(−(dt / (τ / order)))
@@ -618,7 +528,7 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
       }
     };
 
-    #define _SHAPE(A) _shape(_AXIS(A), shaping.A OPTARG(FTM_SMOOTHING, smoothing.A));
+    #define _SHAPE(A) _shape(_AXIS(A), shaping.A);
     SHAPED_MAP(_SHAPE);
 
     if (++shaping.zi_idx == ftm_zmax) shaping.zi_idx = 0;

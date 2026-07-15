@@ -446,11 +446,6 @@ void menu_move() {
           queue.inject(TS(F("M494"), 'T', int(TrajectoryType::POLY6))); ui.go_back();
         });
       #endif
-      #if ENABLED(FTM_CONSTANT_JOLT)
-        if (traj_type != TrajectoryType::CONSTANT_JOLT) ACTION_ITEM(MSG_FTM_CONSTANT_JOLT, []{
-          queue.inject(TS(F("M494"), 'T', int(TrajectoryType::CONSTANT_JOLT))); ui.go_back();
-        });
-      #endif
 
       END_MENU();
     }
@@ -513,13 +508,6 @@ void menu_move() {
       }
     }
 
-    #if ENABLED(FTM_SMOOTHING)
-      editable.decimal = c.smoothingTime[axis];
-      EDIT_ITEM_FAST_N(float43, axis, MSG_FTM_SMOOTH_TIME_N, &editable.decimal, 0.0f, FTM_MAX_SMOOTHING_TIME, []{
-        queue.inject(TS(F("M494"), IAXIS_CHAR(MenuItemBase::itemIndex), p_float_t(editable.decimal, 4)));
-      });
-    #endif
-
     #if HAS_DYNAMIC_FREQ
       if (axis == X_AXIS || axis == Y_AXIS) {
         SUBMENU_N_S(axis, get_dyn_freq_mode_name(), MSG_FTM_DYN_MODE, menu_ftm_dyn_mode);
@@ -562,14 +550,6 @@ void menu_move() {
             editable.decimal = c.poly6_acceleration_overshoot;
             EDIT_ITEM(float42_52, MSG_FTM_POLY6_OVERSHOOT, &editable.decimal, 1.25f, 1.875f, []{
               queue.inject(TS(F("M494"), 'O', editable.decimal));
-            });
-          }
-        #endif
-        #if ENABLED(FTM_CONSTANT_JOLT)
-          if (ftMotion.getTrajectoryType() == TrajectoryType::CONSTANT_JOLT) {
-            editable.decimal = c.jolt / 1000.0f;
-            EDIT_ITEM(float4, MSG_FTM_JOLT, &editable.decimal, 1.0f, 10000.0f, []{
-              queue.inject(TS(F("M494"), 'J', editable.decimal));
             });
           }
         #endif
@@ -625,14 +605,6 @@ void menu_move() {
           editable.decimal = ftMotion.cfg.poly6_acceleration_overshoot;
           EDIT_ITEM(float42_52, MSG_FTM_POLY6_OVERSHOOT, &editable.decimal, 1.25f, 1.875f, []{
             queue.inject(TS(F("M494"), 'O', editable.decimal));
-          });
-        }
-      #endif
-      #if ENABLED(FTM_CONSTANT_JOLT)
-        if (ftMotion.getTrajectoryType() == TrajectoryType::CONSTANT_JOLT) {
-          editable.decimal = ftMotion.cfg.jolt / 1000.0f;
-          EDIT_ITEM(float4, MSG_FTM_JOLT, &editable.decimal, 1.0f, 10000.0f, []{
-            queue.inject(TS(F("M494"), 'J', editable.decimal));
           });
         }
       #endif
