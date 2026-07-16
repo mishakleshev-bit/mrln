@@ -53,6 +53,28 @@ public:
   virtual float getDistanceAtTime(const float t) const = 0;
 
   /**
+   * Get the path velocity at time t.
+   * @param t Time since start of trajectory [s]
+   * @return Velocity [mm/s]
+   */
+  virtual float getVelocityAtTime(const float t) const {
+    // Default: central difference numerical differentiation
+    constexpr float eps = 1e-5f;
+    return (getDistanceAtTime(t + eps) - getDistanceAtTime(t - eps)) / (2.0f * eps);
+  }
+
+  /**
+   * Get the path acceleration at time t.
+   * @param t Time since start of trajectory [s]
+   * @return Acceleration [mm/s²]
+   */
+  virtual float getAccelerationAtTime(const float t) const {
+    // Default: central difference numerical differentiation
+    constexpr float eps = 1e-5f;
+    return (getVelocityAtTime(t + eps) - getVelocityAtTime(t - eps)) / (2.0f * eps);
+  }
+
+  /**
    * Get the total duration of the trajectory.
    * @return Total time [s]
    */

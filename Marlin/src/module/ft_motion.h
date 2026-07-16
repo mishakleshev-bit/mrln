@@ -41,6 +41,12 @@
 
 #define FTM_VERSION   2   // Change version when hosts need to know
 
+// Maximum LA correction per frame (mm) to prevent stepper rate overflow.
+// Can be overridden in Configuration_adv.h before including this file.
+#ifndef FT_MOTION_LA_CLAMP
+  #define FT_MOTION_LA_CLAMP 10.0f
+#endif
+
 #if ENABLED(FTM_DYNAMIC_FREQ)
   #define HAS_DYNAMIC_FREQ 1
   #if HAS_Z_AXIS
@@ -346,9 +352,27 @@ class FTMotion {
       static shaping_t shaping; // Shaping data
     #endif
 
-    // Linear advance variables.
-    #if HAS_EXTRUDERS
-      static float prev_traj_e;
+    // Dual-pipeline: E axis delay buffer for phase synchronization
+    // When shaping is enabled on XYZ but not E, the shaped XYZ outputs
+    // lag behind the unshaped E output by the shaping centroid delay.
+    // E gets delayed by largest_delay_samples frames to stay in sync.
+    #if BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING)
+      static float e_delay_buffer[ftm_zmax + 1];
+      static uint32_t e_delay_wr_idx;
+      // Enqueue current E, return delayed E from largest_delay_samples frames ago
+      static float e_delay_enqueue(const float e_coord) {
+        e_delay_buffer[e_delay_wr_idx] = e_coord;
+        // Dynamic delay = largest shaping delay for phase sync
+        const uint32_t D = shaping.largest_delay_samples;
+        int32_t rd = int32_t(e_delay_wr_idx) - int32_t(D);
+        if (rd < 0) rd += ftm_zmax + 1;
+        const float delayed_e = e_delay_buffer[rd];
+        if (++e_delay_wr_idx > ftm_zmax) e_delay_wr_idx = 0;
+        return delayed_e;
+      }
+      static void e_delay_fill(const float val) {
+        for (uint32_t i = 0; i <= ftm_zmax; ++i) e_delay_buffer[i] = val;
+      }
     #endif
 
     #if HAS_FTM_SHAPING
@@ -368,6 +392,8 @@ class FTMotion {
       // so set all shaping buffers to current position in case the new shaping
       // parameters force input shaping to look in a past position for echoes.
       shaping.fill(endPos_prevBlock);
+      // Reset E delay buffer to current position
+      TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING), e_delay_fill(endPos_prevBlock.e));
       fastForwardUntilMotion = true;
     }
 

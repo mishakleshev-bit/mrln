@@ -107,7 +107,43 @@ float Poly6TrajectoryGenerator::getDistanceAtTime(const float t) const {
        + dec_c6 * K_u(pos_after_coast, nominal_speed, T3, u);
 }
 
-void Poly6TrajectoryGenerator::reset() {
+  }
+
+  float Poly6TrajectoryGenerator::getVelocityAtTime(const float t) const {
+    if (t < T1) {
+      // Accel phase: u=t/T1
+      const float u = t / T1;
+      // v(t) = (s5p_u(v0,Ts,c3,c4,c5,u) + c6*Kp_u(u)) / Ts
+      return (s5p_u(initial_speed, T1, acc_c3, acc_c4, acc_c5, u) + acc_c6 * Kp_u(u)) / T1;
+    }
+    else if (t <= T1_plus_T2) {
+      // Coast
+      return nominal_speed;
+    }
+    // Decel phase
+    const float tau = t - T1_plus_T2,
+                u = tau / T3;
+    return (s5p_u(nominal_speed, T3, dec_c3, dec_c4, dec_c5, u) + dec_c6 * Kp_u(u)) / T3;
+  }
+
+  float Poly6TrajectoryGenerator::getAccelerationAtTime(const float t) const {
+    if (t < T1) {
+      // Accel phase: u=t/T1
+      const float u = t / T1;
+      // a(t) = (s5pp_u(c3,c4,c5,u) + c6*Kpp_u(u)) / Ts²
+      return (s5pp_u(acc_c3, acc_c4, acc_c5, u) + acc_c6 * Kpp_u(u)) / sq(T1);
+    }
+    else if (t <= T1_plus_T2) {
+      // Coast
+      return 0.0f;
+    }
+    // Decel phase
+    const float tau = t - T1_plus_T2,
+                u = tau / T3;
+    return (s5pp_u(dec_c3, dec_c4, dec_c5, u) + dec_c6 * Kpp_u(u)) / sq(T3);
+  }
+
+  void Poly6TrajectoryGenerator::reset() {
   // Reset polynomial coefficients
   acc_c3 = acc_c4 = acc_c5 = 0.0f;
   dec_c3 = dec_c4 = dec_c5 = 0.0f;

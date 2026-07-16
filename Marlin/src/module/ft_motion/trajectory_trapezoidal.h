@@ -80,6 +80,32 @@ public:
     return pos_after_coast + nominal_speed * tau_decel - 0.5f * acceleration * sq(tau_decel);
   }
 
+  float getVelocityAtTime(const float t) const override {
+    if (t < T1) {
+      // Acceleration phase: v = v0 + a*t
+      return initial_speed + acceleration * t;
+    }
+    else if (t <= T1_plus_T2) {
+      // Coasting phase: v = nominal_speed
+      return nominal_speed;
+    }
+    // Deceleration phase: v = v_nominal - a*tau
+    return nominal_speed - acceleration * (t - T1_plus_T2);
+  }
+
+  float getAccelerationAtTime(const float t) const override {
+    if (t < T1) {
+      // Acceleration phase
+      return acceleration;
+    }
+    else if (t <= T1_plus_T2) {
+      // Coasting phase
+      return 0.0f;
+    }
+    // Deceleration phase
+    return -acceleration;
+  }
+
   float getTotalDuration() const override {
     return total_duration;
   }

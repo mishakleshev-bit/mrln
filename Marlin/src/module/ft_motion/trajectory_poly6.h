@@ -38,6 +38,8 @@ public:
   void plan(const float initial_speed, const float final_speed, const float acceleration, const float nominal_speed, const float distance) override;
 
   float getDistanceAtTime(const float t) const override;
+  float getVelocityAtTime(const float t) const override;
+  float getAccelerationAtTime(const float t) const override;
 
   void reset() override;
 
@@ -49,8 +51,13 @@ private:
     const float u2 = sq(u), u3 = u2 * u, u4 = u3 * u, u5 = u4 * u;
     return s0 + v0 * Ts * u + c3 * u3 + c4 * u4 + c5 * u5;
   }
+  static inline float s5p_u(const float v0, const float Ts,
+                            const float c3, const float c4, const float c5, const float u) {
+    // d/du (v0*Ts*u + c3 u^3 + c4 u^4 + c5 u^5) = v0*Ts + 3*c3*u^2 + 4*c4*u^3 + 5*c5*u^4
+    return v0 * Ts + 3.0f * c3 * sq(u) + 4.0f * c4 * cu(u) + 5.0f * c5 * sq(sq(u));
+  }
   static inline float s5pp_u(const float c3, const float c4, const float c5, const float u) {
-    // d^2/du^2 (c3 u^3 + c4 u^4 + c5 u^5) = 6a u + 12 c4 u^2 + 20 c5 u^3
+    // d^2/du^2 (c3 u^3 + c4 u^4 + c5 u^5) = 6*c3*u + 12*c4*u^2 + 20*c5*u^3
     return 6.0f * c3 * u + 12.0f * c4 * sq(u) + 20.0f * c5 * cu(u);
   }
 
@@ -58,6 +65,15 @@ private:
   static inline float K_u(const float /*s0*/, const float /*v0*/, const float /*Ts*/, const float u) {
     const float um1 = 1.0f - u;
     return cu(u) * cu(um1);
+  }
+  static inline float Kp_u(const float u) {
+    // d/du (u^3(1-u)^3) = 3u^2 - 12u^3 + 15u^4 - 6u^5
+    const float u2 = sq(u);
+    return u2 * (3.0f - 12.0f * u + 15.0f * sq(u) - 6.0f * cu(u));
+  }
+  static inline float Kpp_u(const float u) {
+    // d^2/du^2 (u^3(1-u)^3) = 6u - 36u^2 + 60u^3 - 30u^4
+    return 6.0f * u - 36.0f * sq(u) + 60.0f * cu(u) - 30.0f * sq(sq(u));
   }
 
   // New phase polynomials (only the polynomial coefficients are specific to Poly6)

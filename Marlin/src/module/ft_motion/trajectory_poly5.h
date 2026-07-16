@@ -71,7 +71,7 @@ public:
 
   float getDistanceAtTime(const float t) const override {
     if (t < T1) {
-      // Acceration phase
+      // Acceration phase: x(t) = c1*t + c3*t³ + c4*t⁴ + c5*t⁵
       return t * (acc_c1 + sq(t) * (acc_c3 + t * (acc_c4 + t * acc_c5)));
     }
     else if (t <= T1_plus_T2) {
@@ -81,6 +81,32 @@ public:
     // Deceration phase
     const float tau = t - T1_plus_T2;
     return pos_after_coast + tau * (dec_c1 + sq(tau) * (dec_c3 + tau * (dec_c4 + tau * dec_c5)));
+  }
+
+  float getVelocityAtTime(const float t) const override {
+    if (t < T1) {
+      // v(t) = c1 + 3*c3*t² + 4*c4*t³ + 5*c5*t⁴
+      const float t2 = sq(t);
+      return acc_c1 + t2 * (3.0f * acc_c3 + t * (4.0f * acc_c4 + 5.0f * acc_c5 * t));
+    }
+    else if (t <= T1_plus_T2) {
+      return nominal_speed;
+    }
+    const float tau = t - T1_plus_T2,
+                tau2 = sq(tau);
+    return dec_c1 + tau2 * (3.0f * dec_c3 + tau * (4.0f * dec_c4 + 5.0f * dec_c5 * tau));
+  }
+
+  float getAccelerationAtTime(const float t) const override {
+    if (t < T1) {
+      // a(t) = 6*c3*t + 12*c4*t² + 20*c5*t³
+      return t * (6.0f * acc_c3 + t * (12.0f * acc_c4 + 20.0f * acc_c5 * t));
+    }
+    else if (t <= T1_plus_T2) {
+      return 0.0f;
+    }
+    const float tau = t - T1_plus_T2;
+    return tau * (6.0f * dec_c3 + tau * (12.0f * dec_c4 + 20.0f * dec_c5 * tau));
   }
 
   void reset() override {

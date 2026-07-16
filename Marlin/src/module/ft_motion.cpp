@@ -120,9 +120,10 @@ TrapezoidalTrajectoryGenerator FTMotion::trapezoidalGenerator;
   };
 #endif
 
-#if HAS_EXTRUDERS
-  // Linear advance variables.
-  float FTMotion::prev_traj_e = 0.0f;     // (ms) Unit delay of raw extruder position.
+// Dual-pipeline E delay buffer
+#if BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING)
+  float FTMotion::e_delay_buffer[ftm_zmax + 1] = { 0.0f };
+  uint32_t FTMotion::e_delay_wr_idx = 0;
 #endif
 
 // Stepping variables.
@@ -204,8 +205,9 @@ void FTMotion::reset() {
   shaping.reset();
   fastForwardUntilMotion = true;
 
-  TERN_(HAS_EXTRUDERS, prev_traj_e = 0.0f);  // Reset linear advance variables.
   TERN_(DISTINCT_E_FACTORS, block_extruder_axis = E_AXIS);
+  // Reset E delay buffer to zero
+  TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING), e_delay_fill(0.0f));
 
   moving_axis_flags.reset();
   last_target_traj.reset();
@@ -413,8 +415,10 @@ bool FTMotion::plan_next_block() {
       for (uint32_t i = 0; i < ftm_zmax; ++i) shaping.E.d_zi[i] += offset;
     #endif
 
-    // Offset linear advance previous position
-    prev_traj_e += offset;
+    // Offset E delay buffer
+    TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING),
+      for (uint32_t i = 0; i <= ftm_zmax; ++i) e_delay_buffer[i] += offset;
+    );
 
     // Make sure the difference is accounted-for in the past
     last_target_traj.e += offset;
@@ -431,33 +435,35 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
   #define _SET_TRAJ(q) traj_coords.q = startPos.q + ratio.q * dist;
   LOGICAL_AXIS_MAP_LC(_SET_TRAJ);
 
-  #if FTM_HAS_LIN_ADVANCE
-    float traj_e = traj_coords.e;
+  // Save pre-LA E for dynFreq mass-based frequency estimation
+  TERN_(HAS_DYNAMIC_FREQ_G, const float e_ref = traj_coords.e);
 
+  #if FTM_HAS_LIN_ADVANCE
     // Apply LA/NLE only to printing (not retract/unretract) blocks
     if (use_advance_lead) {
-      const float traj_e_delta = traj_e - prev_traj_e; // Extruder delta in mm, always positive for use_advance_lead (printing moves)
-      const float e_rate = traj_e_delta * (FTM_FS);    // Extruder velocity in mm/s
+      // Analytical velocity from trajectory generator —
+      // cleaner than finite-difference of E positions, no aliasing.
+      const float e_rate = currentGenerator->getVelocityAtTime(tau); // (mm/s)
+      const float e_extra = e_rate * planner.get_advance_k();        // (mm)
 
-      traj_coords.e += e_rate * planner.get_advance_k();
+      // Clamp LA correction to prevent stepper overflow
+      traj_coords.e += _MIN(e_extra, FT_MOTION_LA_CLAMP);
 
       #if ENABLED(NONLINEAR_EXTRUSION)
         if (stepper.nle.settings.enabled) {
           const nonlinear_coeff_t &coeff = stepper.nle.settings.coeff;
-          const float multiplier = max(coeff.C, coeff.A * sq(e_rate) + coeff.B * e_rate + coeff.C),
-                      nle_term = traj_e_delta * (multiplier - 1);
+          const float multiplier = max(coeff.C, coeff.A * sq(e_rate) + coeff.B * e_rate + coeff.C);
+          // Per-frame E delta from analytical velocity
+          const float traj_e_delta = e_rate * (FTM_TS); // (mm/frame)
+          const float nle_term = traj_e_delta * (multiplier - 1);
 
           traj_coords.e += nle_term;
-          traj_e += nle_term;
           startPos.e += nle_term;
           endPos_prevBlock.e += nle_term;
         }
       #endif
     }
-
-    prev_traj_e = traj_e;
-
-  #endif // FTM_HAS_LIN_ADVANCE
+  #endif
 
   // Update shaping parameters if needed.
   switch (cfg.dynFreqMode) {
@@ -489,10 +495,10 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
         // Update constantly. The optimization done for Z value makes
         // less sense for E, as E is expected to constantly change.
         #if HAS_X_AXIS
-          shaping.X.set_axis_shaping_N(cfg.shaper.x, cfg.baseFreq.x + cfg.dynFreqK.x * traj_coords.e, cfg.zeta.x);
+          shaping.X.set_axis_shaping_N(cfg.shaper.x, cfg.baseFreq.x + cfg.dynFreqK.x * e_ref, cfg.zeta.x);
         #endif
         #if HAS_Y_AXIS
-          shaping.Y.set_axis_shaping_N(cfg.shaper.y, cfg.baseFreq.y + cfg.dynFreqK.y * traj_coords.e, cfg.zeta.y);
+          shaping.Y.set_axis_shaping_N(cfg.shaper.y, cfg.baseFreq.y + cfg.dynFreqK.y * e_ref, cfg.zeta.y);
         #endif
         shaping.refresh_largest_delay_samples();
         break;
@@ -508,7 +514,7 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
     if (ftMotion.cfg.axis_sync_enabled)
       max_total_delay += shaping.largest_delay_samples;
 
-    // Apply shaping if active on each axis
+    // Apply shaping if active — XYZ only (dual-pipeline: E bypasses shaping)
     auto _shape = [&](const AxisEnum axis, axis_shaping_t &shap) {
       const uint32_t group_delay = ftMotion.cfg.axis_sync_enabled
           ? max_total_delay
@@ -528,8 +534,13 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
       }
     };
 
-    #define _SHAPE(A) _shape(_AXIS(A), shaping.A);
-    SHAPED_MAP(_SHAPE);
+    // Shape XYZ only (E uses phase-delay pipeline instead)
+    TERN_(HAS_X_AXIS, _shape(X_AXIS, shaping.X));
+    TERN_(HAS_Y_AXIS, _shape(Y_AXIS, shaping.Y));
+    TERN_(HAS_Z_AXIS, _shape(Z_AXIS, shaping.Z));
+
+    // Phase-delay E to match shaped XYZ centroid
+    TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING), traj_coords.e = e_delay_enqueue(traj_coords.e));
 
     if (++shaping.zi_idx == ftm_zmax) shaping.zi_idx = 0;
 
