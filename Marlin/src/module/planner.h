@@ -589,6 +589,16 @@ class Planner {
         UNUSED(e);
         return extruder_advance_K[E_INDEX_N(e)];
       }
+
+      static float extruder_advance_K_accel[DISTINCT_E];                  //!< Acceleration K factor for FT Motion LA (M900 A)
+      static void set_advance_k_accel(const float k, const uint8_t e=motion.extruder) {
+        UNUSED(e);
+        extruder_advance_K_accel[E_INDEX_N(e)] = k;
+      }
+      static float get_advance_k_accel(const uint8_t e=motion.extruder) {
+        UNUSED(e);
+        return extruder_advance_K_accel[E_INDEX_N(e)];
+      }
     #endif
 
     #if ENABLED(SMOOTH_LIN_ADVANCE)

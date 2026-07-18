@@ -356,7 +356,7 @@ class FTMotion {
     // When shaping is enabled on XYZ but not E, the shaped XYZ outputs
     // lag behind the unshaped E output by the shaping centroid delay.
     // E gets delayed by largest_delay_samples frames to stay in sync.
-    #if BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING)
+    #if defined(HAS_EXTRUDERS) && defined(HAS_FTM_SHAPING)
       static float e_delay_buffer[ftm_zmax + 1];
       static uint32_t e_delay_wr_idx;
       // Enqueue current E, return delayed E from largest_delay_samples frames ago
@@ -393,7 +393,9 @@ class FTMotion {
       // parameters force input shaping to look in a past position for echoes.
       shaping.fill(endPos_prevBlock);
       // Reset E delay buffer to current position
-      TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING), e_delay_fill(endPos_prevBlock.e));
+      #if defined(HAS_EXTRUDERS) && defined(HAS_FTM_SHAPING)
+        e_delay_fill(endPos_prevBlock.e);
+      #endif
       fastForwardUntilMotion = true;
     }
 

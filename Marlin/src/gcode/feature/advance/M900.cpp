@@ -44,6 +44,9 @@
  *
  * With SMOOTH_LIN_ADVANCE:
  *  U<tau>      Set a tau value for LA smoothing
+ *
+ * With FT_MOTION:
+ *  A<factor>   Set acceleration K factor for FT Motion Linear Advance (M900 A)
  */
 void GcodeSuite::M900() {
 
@@ -71,6 +74,11 @@ void GcodeSuite::M900() {
   #if ENABLED(SMOOTH_LIN_ADVANCE)
     const float oldU = stepper.get_advance_tau(tool_index);
     float newU = oldU;
+  #endif
+
+  #if FTM_HAS_LIN_ADVANCE
+    const float oldKA = planner.get_advance_k_accel(tool_index);
+    float newKA = oldKA;
   #endif
 
   #if ENABLED(ADVANCE_K_EXTRA)
@@ -126,11 +134,24 @@ void GcodeSuite::M900() {
     }
   #endif
 
-  if (newK != oldK || TERN0(SMOOTH_LIN_ADVANCE, newU != oldU)) {
+  #if FTM_HAS_LIN_ADVANCE
+    if (parser.seenval('A')) {
+      const float KA = parser.value_float();
+      if (WITHIN(KA, 0, 10))
+        newKA = KA;
+      else
+        echo_value_oor('A');
+    }
+  #endif
+
+  if (newK != oldK || TERN0(SMOOTH_LIN_ADVANCE, newU != oldU) || TERN0(FTM_HAS_LIN_ADVANCE, newKA != oldKA)) {
     planner.synchronize();
     if (newK != oldK) planner.set_advance_k(newK, tool_index);
     #if ENABLED(SMOOTH_LIN_ADVANCE)
       if (newU != oldU) stepper.set_advance_tau(newU, tool_index);
+    #endif
+    #if FTM_HAS_LIN_ADVANCE
+      if (newKA != oldKA) planner.set_advance_k_accel(newKA, tool_index);
     #endif
   }
 
@@ -139,12 +160,16 @@ void GcodeSuite::M900() {
     #if ENABLED(ADVANCE_K_EXTRA)
 
       #if DISABLED(DISTINCT_E_FACTORS)
-        SERIAL_ECHOLNPGM("Advance S", new_slot, " K", newK, "(S", !new_slot, " K", lref, ")");
+        SERIAL_ECHOLNPGM("Advance S", new_slot, " K", newK, "(S", !new_slot, " K", lref, ")"
+          OPTARG(FTM_HAS_LIN_ADVANCE, " KA", planner.get_advance_k_accel())
+        );
       #else
         EXTRUDER_LOOP() {
           const bool slot = TEST(lin_adv_slot, e);
           SERIAL_ECHOLNPGM("Advance T", e, " S", slot, " K", planner.get_advance_k(e),
-                           "(S", !slot, " K", other_extruder_advance_K[e], ")");
+                           "(S", !slot, " K", other_extruder_advance_K[e], ")"
+                           OPTARG(FTM_HAS_LIN_ADVANCE, " KA", planner.get_advance_k_accel(e))
+          );
         }
       #endif
 
@@ -156,6 +181,7 @@ void GcodeSuite::M900() {
         #if ENABLED(SMOOTH_LIN_ADVANCE)
           SERIAL_ECHOPGM(" TAU=", stepper.get_advance_tau());
         #endif
+        TERN_(FTM_HAS_LIN_ADVANCE, SERIAL_ECHOPGM(" KA=", planner.get_advance_k_accel()));
         SERIAL_EOL();
       #else
         SERIAL_ECHOPGM("Advance K");
@@ -166,6 +192,9 @@ void GcodeSuite::M900() {
           EXTRUDER_LOOP() SERIAL_ECHO(C(' '), C('0' + e), C(':'), stepper.get_advance_tau(e));
           SERIAL_EOL();
         #endif
+        TERN_(FTM_HAS_LIN_ADVANCE, SERIAL_ECHOPGM("Advance KA"));
+        TERN_(FTM_HAS_LIN_ADVANCE, EXTRUDER_LOOP() SERIAL_ECHO(C(' '), C('0' + e), C(':'), planner.get_advance_k_accel(e)));
+        TERN_(FTM_HAS_LIN_ADVANCE, SERIAL_EOL());
       #endif
 
     #endif // !ADVANCE_K_EXTRA
@@ -190,6 +219,7 @@ void GcodeSuite::M900_report(const bool forReplay/*=true*/) {
     #if ENABLED(SMOOTH_LIN_ADVANCE)
       SERIAL_ECHOPGM(" U", stepper.get_advance_tau(e));
     #endif
+    TERN_(FTM_HAS_LIN_ADVANCE, SERIAL_ECHOPGM(" A", planner.get_advance_k_accel(e)));
     SERIAL_EOL();
   }
 }

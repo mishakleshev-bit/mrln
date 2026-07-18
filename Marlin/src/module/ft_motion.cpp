@@ -121,7 +121,7 @@ TrapezoidalTrajectoryGenerator FTMotion::trapezoidalGenerator;
 #endif
 
 // Dual-pipeline E delay buffer
-#if BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING)
+#if defined(HAS_EXTRUDERS) && defined(HAS_FTM_SHAPING)
   float FTMotion::e_delay_buffer[ftm_zmax + 1] = { 0.0f };
   uint32_t FTMotion::e_delay_wr_idx = 0;
 #endif
@@ -207,7 +207,9 @@ void FTMotion::reset() {
 
   TERN_(DISTINCT_E_FACTORS, block_extruder_axis = E_AXIS);
   // Reset E delay buffer to zero
-  TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING), e_delay_fill(0.0f));
+  #if defined(HAS_EXTRUDERS) && defined(HAS_FTM_SHAPING)
+    e_delay_fill(0.0f);
+  #endif
 
   moving_axis_flags.reset();
   last_target_traj.reset();
@@ -306,6 +308,7 @@ FSTR_P FTMotion::getTrajectoryName() {
     #if ENABLED(FTM_POLYS)
       case TrajectoryType::POLY5:     return GET_TEXT_F(MSG_FTM_POLY5);
       case TrajectoryType::POLY6:     return GET_TEXT_F(MSG_FTM_POLY6);
+    #endif
   }
 }
 
@@ -416,9 +419,9 @@ bool FTMotion::plan_next_block() {
     #endif
 
     // Offset E delay buffer
-    TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING),
+    #if defined(HAS_EXTRUDERS) && defined(HAS_FTM_SHAPING)
       for (uint32_t i = 0; i <= ftm_zmax; ++i) e_delay_buffer[i] += offset;
-    );
+    #endif
 
     // Make sure the difference is accounted-for in the past
     last_target_traj.e += offset;
@@ -443,11 +446,25 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
     if (use_advance_lead) {
       // Analytical velocity from trajectory generator —
       // cleaner than finite-difference of E positions, no aliasing.
-      const float e_rate = currentGenerator->getVelocityAtTime(tau); // (mm/s)
-      const float e_extra = e_rate * planner.get_advance_k();        // (mm)
+      // NOTE: getVelocityAtTime gives PATH velocity (mm/s).
+      // E-axis velocity = PATH velocity * ratio.e
+      const float path_rate = currentGenerator->getVelocityAtTime(tau); // (mm/s)
+      const float e_rate = path_rate * ratio.e;                         // (mm/s) ← BUG FIX
 
-      // Clamp LA correction to prevent stepper overflow
-      traj_coords.e += _MIN(e_extra, FT_MOTION_LA_CLAMP);
+      // Combined LA: velocity term + acceleration term
+      //   e_extra = K_v * v_E + K_a * a_E   [mm]
+      // K_accel = 0 by default — backward compatible with existing K tuning.
+      const float e_extra = e_rate * planner.get_advance_k() + planner.get_advance_k_accel() * currentGenerator->getAccelerationAtTime(tau) * ratio.e;
+
+      // Clamp LA correction (sum of velocity + accel terms) to prevent
+      // Q16.16 fixed-point overflow in stepping.enqueue().
+      traj_coords.e += _MAX(-FT_MOTION_LA_CLAMP, _MIN(e_extra, FT_MOTION_LA_CLAMP));
+
+      // Guard against E-coordinate corruption from NaN/Inf — fall back to linear interpolation.
+      if (!isfinite(traj_coords.e)) {
+        SERIAL_ERROR_MSG("FT Motion: E position NaN/Inf, fallback to linear interpolation");
+        traj_coords.e = startPos.e + ratio.e * dist;
+      }
 
       #if ENABLED(NONLINEAR_EXTRUSION)
         if (stepper.nle.settings.enabled) {
@@ -535,12 +552,15 @@ xyze_float_t FTMotion::calc_traj_point(const float dist) {
     };
 
     // Shape XYZ only (E uses phase-delay pipeline instead)
-    TERN_(HAS_X_AXIS, _shape(X_AXIS, shaping.X));
-    TERN_(HAS_Y_AXIS, _shape(Y_AXIS, shaping.Y));
-    TERN_(HAS_Z_AXIS, _shape(Z_AXIS, shaping.Z));
+    // Each axis is shaped only if its shaper is enabled (FTM_SHAPER_X/Y/Z)
+    TERN_(FTM_SHAPER_X, _shape(X_AXIS, shaping.X));
+    TERN_(FTM_SHAPER_Y, _shape(Y_AXIS, shaping.Y));
+    TERN_(FTM_SHAPER_Z, _shape(Z_AXIS, shaping.Z));
 
     // Phase-delay E to match shaped XYZ centroid
-    TERN_(BOTH(HAS_EXTRUDERS, HAS_FTM_SHAPING), traj_coords.e = e_delay_enqueue(traj_coords.e));
+    #if defined(HAS_EXTRUDERS) && defined(HAS_FTM_SHAPING)
+      traj_coords.e = e_delay_enqueue(traj_coords.e);
+    #endif
 
     if (++shaping.zi_idx == ftm_zmax) shaping.zi_idx = 0;
 

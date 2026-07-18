@@ -107,9 +107,7 @@ float Poly6TrajectoryGenerator::getDistanceAtTime(const float t) const {
        + dec_c6 * K_u(pos_after_coast, nominal_speed, T3, u);
 }
 
-  }
-
-  float Poly6TrajectoryGenerator::getVelocityAtTime(const float t) const {
+ float Poly6TrajectoryGenerator::getVelocityAtTime(const float t) const {
     if (t < T1) {
       // Accel phase: u=t/T1
       const float u = t / T1;
